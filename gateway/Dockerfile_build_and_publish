@@ -1,0 +1,53 @@
+# Builder stage
+FROM rust:1.91-slim AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    gcc \
+    g++ \
+    cmake \
+    pkg-config \
+    libssl-dev \
+    libclang-dev \
+    libzstd-dev \
+    libhugetlbfs-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /usr/src/app
+
+# Copy all source files
+COPY . .
+
+# Build the binary
+RUN cargo build --release --bin gateway
+
+# Runtime stage
+FROM rust:1.91-slim AS runtime
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libssl3 \
+    libzstd1 \
+    libhugetlbfs0 \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy the compiled binary from the builder stage
+COPY --from=builder /usr/src/app/target/release/gateway /app/gateway
+
+# Copy the restricted filters configuration
+COPY --from=builder /usr/src/app/restricted_filters.json /app/restricted_filters.json
+
+# Expose gateway port
+EXPOSE 8443
+
+# Set entrypoint using absolute path or relative to WORKDIR
+ENTRYPOINT ["./gateway"]
+CMD ["--server-addr", "0.0.0.0:8443"]

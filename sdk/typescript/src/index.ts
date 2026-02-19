@@ -1,0 +1,44 @@
+export { GatewayClient } from "./client";
+export type {
+  // Event types
+  EventName,
+  ExecEvent,
+  ExecEventPayload,
+  BlockStartPayload,
+  BlockEndPayload,
+  BlockQCPayload,
+  BlockFinalizedPayload,
+  BlockVerifiedPayload,
+  BlockRejectPayload,
+  TxnHeaderStartPayload,
+  TxnEvmOutputPayload,
+  TxnLogPayload,
+  TxnCallFramePayload,
+  TxnRejectPayload,
+  TxnAccessListEntryPayload,
+  TxnAuthListEntryPayload,
+  AccountAccessListHeaderPayload,
+  AccountAccessPayload,
+  StorageAccessPayload,
+  RecordErrorPayload,
+  EvmErrorPayload,
+  EmptyPayload,
+  // Metrics
+  ContentionData,
+  ContendedSlotEntry,
+  ContractContentionEntry,
+  ContractEdge,
+  TopAccessesData,
+  AccessEntry,
+  // Channels & Subscriptions
+  Channel,
+  SubscribeMessage,
+  // REST
+  TPSResponse,
+  StatusResponse,
+  // Server protocol
+  ServerMessage,
+  // Client
+  GatewayClientOptions,
+  GatewayClientEvents,
+} from "./types";

@@ -1,0 +1,28 @@
+version: '3.9'
+
+services:
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: execution-events-gateway
+    network_mode: host
+    environment:
+      - RUST_LOG=info
+    volumes:
+      # Mount the Monad event ring (read-only)
+      # Update the host path if your event ring is located elsewhere
+      - /var/lib/hugetlbfs/user/monad/pagesize-2MB/event-rings:/var/lib/hugetlbfs/user/monad/pagesize-2MB/event-rings:ro
+    restart: unless-stopped
+    command: ["--server-addr", "0.0.0.0:8443"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8443/health | grep -q '\"success\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
