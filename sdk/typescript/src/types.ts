@@ -296,15 +296,57 @@ export interface SimpleSubscribe {
   subscribe: string[];
 }
 
-/** Advanced subscribe: events + field-level filters */
+/**
+ * Field-level filter for advanced subscriptions.
+ * Maps to the server's FieldFilter enum (serde tag="field", content="filter").
+ *
+ * Supported fields:
+ * - `txn_index`: Range filter `{ min?: number, max?: number }`
+ * - `log_index`: Range filter `{ min?: number, max?: number }`
+ * - `address`: Exact match `{ values: ["0x..."] }`
+ * - `topics`: Array prefix match `{ values: ["0x..."] }`
+ */
+export interface FieldFilter {
+  field: "txn_index" | "log_index" | "address" | "topics";
+  filter: {
+    values?: string[];
+    min?: number;
+    max?: number;
+  };
+}
+
+/**
+ * Filter spec for a single event type with optional field filters.
+ * Multiple field filters are combined with AND logic.
+ */
+export interface EventFilterSpec {
+  event_name: EventName;
+  field_filters?: FieldFilter[];
+}
+
+/**
+ * Advanced subscribe: events + field-level filters.
+ *
+ * The `filters` array uses EventFilterSpec format matching the server's
+ * Rust `EventFilterSpec` struct. Multiple specs are combined with OR logic.
+ *
+ * @example
+ * ```ts
+ * client.subscribe({
+ *   events: ["TxnLog"],
+ *   filters: [{
+ *     event_name: "TxnLog",
+ *     field_filters: [
+ *       { field: "address", filter: { values: ["0xabc..."] } }
+ *     ]
+ *   }]
+ * });
+ * ```
+ */
 export interface AdvancedSubscribe {
   subscribe: {
     events: string[];
-    filters?: Array<{
-      event_name: EventName;
-      field_name: string;
-      field_value: string;
-    }>;
+    filters?: EventFilterSpec[];
   };
 }
 

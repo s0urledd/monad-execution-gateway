@@ -33,6 +33,10 @@ export type {
   // Channels & Subscriptions
   Channel,
   SubscribeMessage,
+  SimpleSubscribe,
+  AdvancedSubscribe,
+  FieldFilter,
+  EventFilterSpec,
   // REST
   TPSResponse,
   StatusResponse,

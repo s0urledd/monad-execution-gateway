@@ -8,7 +8,9 @@ import type {
   ContentionData,
   TopAccessesData,
   Channel,
-  SubscribeMessage,
+  SimpleSubscribe,
+  AdvancedSubscribe,
+  EventFilterSpec,
   TPSResponse,
   StatusResponse,
 } from "./types";
@@ -57,6 +59,7 @@ export class GatewayClient {
   private shouldReconnect = true;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private baseUrl: string;
+  private pendingSubscription: SimpleSubscribe | AdvancedSubscribe | null = null;
 
   constructor(options: GatewayClientOptions) {
     this.options = {
@@ -67,7 +70,6 @@ export class GatewayClient {
       ...options,
     };
 
-    // Parse the base URL (strip trailing slash and any existing path for channel routing)
     this.baseUrl = this.options.url.replace(/\/+$/, "");
   }
 
@@ -91,6 +93,12 @@ export class GatewayClient {
       this.ws.on("open", () => {
         this.reconnectAttempts = 0;
         this.emit("connected");
+
+        // Re-send subscription after reconnect
+        if (this.pendingSubscription) {
+          this.sendRaw(JSON.stringify(this.pendingSubscription));
+        }
+
         resolve();
       });
 
@@ -135,31 +143,40 @@ export class GatewayClient {
   /**
    * Send a subscription message to filter events server-side.
    *
-   * Simple format — subscribe to specific event types:
+   * **Simple format** — subscribe to specific event types:
    * ```ts
    * client.subscribe(["BlockFinalized", "TPS", "ContentionData"]);
    * ```
    *
-   * Advanced format — with field-level filters:
+   * **Advanced format** — with field-level filters:
    * ```ts
    * client.subscribe({
-   *   events: ["AccountAccess"],
-   *   filters: [{ event_name: "AccountAccess", field_name: "address", field_value: "0x..." }]
+   *   events: ["TxnLog"],
+   *   filters: [{
+   *     event_name: "TxnLog",
+   *     field_filters: [
+   *       { field: "address", filter: { values: ["0x..."] } }
+   *     ]
+   *   }]
    * });
    * ```
    */
   subscribe(
-    sub: string[] | { events: string[]; filters?: Array<{ event_name: EventName; field_name: string; field_value: string }> }
+    sub: string[] | { events: string[]; filters?: EventFilterSpec[] }
   ): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error("Not connected. Call connect() first.");
+    let msg: SimpleSubscribe | AdvancedSubscribe;
+
+    if (Array.isArray(sub)) {
+      msg = { subscribe: sub };
+    } else {
+      msg = { subscribe: sub };
     }
 
-    const msg: SubscribeMessage = Array.isArray(sub)
-      ? { subscribe: sub }
-      : { subscribe: sub };
+    this.pendingSubscription = msg;
 
-    this.ws.send(JSON.stringify(msg));
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.sendRaw(JSON.stringify(msg));
+    }
   }
 
   /**
@@ -268,7 +285,6 @@ export class GatewayClient {
 
   private buildWsUrl(): string {
     const channelPath = CHANNEL_PATHS[this.options.channel];
-    // If the URL already contains a path (e.g. /v1/ws/blocks), use it as-is
     try {
       const parsed = new URL(this.baseUrl);
       if (parsed.pathname && parsed.pathname !== "/") {
@@ -278,6 +294,12 @@ export class GatewayClient {
       // not a valid URL, just append
     }
     return `${this.baseUrl}${channelPath}`;
+  }
+
+  private sendRaw(data: string): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(data);
+    }
   }
 
   private handleMessage(msg: ServerMessage): void {
