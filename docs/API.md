@@ -57,22 +57,37 @@ After connecting, clients can send a subscribe message to filter events server-s
 }
 ```
 
-**Advanced format** — with field-level filters:
+**Advanced format** — with field-level filters (matches server's `EventFilterSpec` format):
 
 ```json
 {
   "subscribe": {
-    "events": ["AccountAccess"],
+    "events": ["TxnLog"],
     "filters": [
       {
-        "event_name": "AccountAccess",
-        "field_name": "address",
-        "field_value": "0x..."
+        "event_name": "TxnLog",
+        "field_filters": [
+          {
+            "field": "address",
+            "filter": { "values": ["0x..."] }
+          }
+        ]
       }
     ]
   }
 }
 ```
+
+**Supported field filters:**
+
+| Field | Filter Type | Applies To | Example |
+|-------|-------------|------------|---------|
+| `txn_index` | Range (`min`, `max`) | TxnLog | `{ "field": "txn_index", "filter": { "min": 0, "max": 5 } }` |
+| `log_index` | Range (`min`, `max`) | TxnLog | `{ "field": "log_index", "filter": { "min": 0 } }` |
+| `address` | Exact match (`values`) | TxnLog | `{ "field": "address", "filter": { "values": ["0x..."] } }` |
+| `topics` | Array prefix (`values`) | TxnLog | `{ "field": "topics", "filter": { "values": ["0x..."] } }` |
+
+Multiple field filters within a spec are combined with **AND** logic. Multiple filter specs in the `filters` array are combined with **OR** logic.
 
 **Subscribable items:**
 - Any event name (see [Events Reference](EVENTS.md)): `BlockStart`, `BlockFinalized`, `TxnLog`, etc.

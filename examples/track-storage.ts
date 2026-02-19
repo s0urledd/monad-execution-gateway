@@ -32,14 +32,16 @@ let currentBlock = 0;
 client.on("connected", () => {
   console.log(`Connected — subscribing to events for ${targetAddress}...`);
 
-  // Use client-driven subscription to only receive the events we need
+  // Use client-driven subscription to only receive the events we need.
+  // Advanced format: filters use EventFilterSpec matching the server's Rust types.
   client.subscribe({
     events: ["BlockStart", "AccountAccess"],
     filters: [
       {
         event_name: "AccountAccess",
-        field_name: "address",
-        field_value: targetAddress,
+        field_filters: [
+          { field: "address", filter: { values: [targetAddress] } },
+        ],
       },
     ],
   });

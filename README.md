@@ -22,8 +22,8 @@ Community-maintained public Execution Events Gateway for Monad builders. Real-ti
 ### Docker
 
 ```bash
-git clone https://github.com/s0urledd/monode.git
-cd monode
+git clone https://github.com/s0urledd/monad-execution-gateway.git
+cd monad-execution-gateway
 docker compose up -d
 ```
 
@@ -158,7 +158,7 @@ The gateway computes three real-time analytics on the server side:
 ## Project Structure
 
 ```
-monode/
+monad-execution-gateway/
 ├── gateway/                 # Rust WebSocket + REST gateway server
 │   ├── src/
 │   │   ├── bin/gateway.rs   # Entry point
