@@ -408,6 +408,28 @@ impl BlockLifecycleTracker {
         let hash = self.number_to_hash.get(&block_number)?;
         self.get_lifecycle_by_hash(hash)
     }
+
+    /// Get current state of all active (non-terminal) blocks as lifecycle
+    /// updates. Used for replay on WebSocket connect so new clients see
+    /// in-progress blocks immediately.
+    pub fn get_active_updates(&self) -> Vec<BlockLifecycleUpdate> {
+        let mut updates: Vec<BlockLifecycleUpdate> = self
+            .active_blocks
+            .values()
+            .map(|lc| BlockLifecycleUpdate {
+                block_hash: lc.block_hash,
+                block_number: lc.block_number,
+                from_stage: None,
+                to_stage: lc.current_stage,
+                time_in_previous_stage_ms: None,
+                block_age_ms: lc.total_age_ms().unwrap_or(0.0),
+                txn_count: lc.txn_count,
+                gas_used: lc.gas_used,
+            })
+            .collect();
+        updates.sort_by_key(|u| u.block_number);
+        updates
+    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
