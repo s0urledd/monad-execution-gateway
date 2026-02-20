@@ -335,12 +335,21 @@ export interface ContentionData {
 
 // ─── Server Messages ────────────────────────────────────────────────
 
-export type ServerMessage =
+/**
+ * Every message from the server carries a `server_seqno` — a monotonic
+ * counter that uniquely identifies each wire message.  On reconnect the
+ * client can pass `?resume_from=<server_seqno>` to pick up exactly
+ * where it left off without re-receiving already-processed data.
+ */
+export type ServerMessage = {
+  server_seqno: number;
+} & (
   | { Events: ExecEvent[] }
   | { TopAccesses: TopAccessesData }
   | { TPS: number }
   | { ContentionData: ContentionData }
-  | { Lifecycle: BlockLifecycleUpdate };
+  | { Lifecycle: BlockLifecycleUpdate }
+);
 
 // ─── Channels ───────────────────────────────────────────────────────
 
@@ -423,6 +432,8 @@ export interface StatusResponse {
   connected_clients: number;
   uptime_secs: number;
   last_event_age_secs: number;
+  /** Current server-level sequence number (for cursor resume) */
+  server_seqno: number;
 }
 
 export interface LifecycleResponse extends Array<BlockLifecycleSummary> {}

@@ -1,19 +1,19 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{Address, B256};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use monad_exec_events::ExecEvent;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info, warn};
 
@@ -53,11 +53,56 @@ pub enum ServerMessage {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Cursor Resume & Backpressure Constants
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Maximum number of broadcast items kept in the resume ring buffer.
+/// At ~1KB avg per item this is ~100MB worst case.
+const MAX_EVENT_HISTORY: usize = 100_000;
+
+/// Per-client outbound buffer capacity (in serialized JSON messages).
+const CLIENT_SEND_BUFFER: usize = 4_096;
+
+/// After this many dropped messages, disconnect the slow client.
+const SLOW_CLIENT_DROP_LIMIT: u64 = 10_000;
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Sequenced Broadcast Item
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Every broadcast item is tagged with a monotonic server-level seqno.
+/// This seqno is independent of the per-event ring-buffer seqno.
+#[derive(Debug, Clone)]
+struct SequencedItem {
+    seqno: u64,
+    item: EventDataOrMetrics,
+}
+
+/// Wire wrapper: every JSON message sent to clients carries a `server_seqno`.
+/// The client stores the last seen value and passes it back as
+/// `?resume_from=<server_seqno>` on reconnect.
+#[derive(Serialize)]
+struct WireMessage<'a> {
+    server_seqno: u64,
+    #[serde(flatten)]
+    message: &'a ServerMessage,
+}
+
+/// Query parameters accepted on WebSocket upgrade endpoints.
+#[derive(Deserialize, Default)]
+struct WsQuery {
+    /// If provided, the server replays all buffered items with
+    /// `server_seqno > resume_from` before switching to live mode.
+    #[serde(default)]
+    resume_from: Option<u64>,
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Gateway State
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 pub struct GatewayState {
-    pub event_broadcast: broadcast::Sender<EventDataOrMetrics>,
+    pub event_broadcast: broadcast::Sender<SequencedItem>,
     pub tps: watch::Receiver<usize>,
     pub contention: watch::Receiver<Option<ContentionData>>,
     pub block_number: AtomicU64,
@@ -66,6 +111,10 @@ pub struct GatewayState {
     pub last_event_time: AtomicU64,
     pub base_filter: EventFilter,
     pub lifecycle_tracker: RwLock<BlockLifecycleTracker>,
+    /// Monotonic counter for server-level message sequencing.
+    pub server_seqno: AtomicU64,
+    /// Ring buffer of recent broadcast items for cursor-resume.
+    pub event_history: Mutex<VecDeque<SequencedItem>>,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -296,24 +345,24 @@ impl TPSTracker {
 // WebSocket Handlers
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async fn ws_all(ws: WebSocketUpgrade, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::All))
+async fn ws_all(ws: WebSocketUpgrade, Query(q): Query<WsQuery>, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::All, q.resume_from))
 }
 
-async fn ws_blocks(ws: WebSocketUpgrade, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Blocks))
+async fn ws_blocks(ws: WebSocketUpgrade, Query(q): Query<WsQuery>, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Blocks, q.resume_from))
 }
 
-async fn ws_txs(ws: WebSocketUpgrade, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Transactions))
+async fn ws_txs(ws: WebSocketUpgrade, Query(q): Query<WsQuery>, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Transactions, q.resume_from))
 }
 
-async fn ws_contention_handler(ws: WebSocketUpgrade, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Contention))
+async fn ws_contention_handler(ws: WebSocketUpgrade, Query(q): Query<WsQuery>, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Contention, q.resume_from))
 }
 
-async fn ws_lifecycle(ws: WebSocketUpgrade, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Lifecycle))
+async fn ws_lifecycle(ws: WebSocketUpgrade, Query(q): Query<WsQuery>, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Lifecycle, q.resume_from))
 }
 
 /// Build a snapshot of current gateway state to send on WebSocket connect.
@@ -373,65 +422,218 @@ fn build_replay(channel: &Channel, state: &GatewayState) -> Vec<ServerMessage> {
     msgs
 }
 
-async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel) {
+async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel, resume_from: Option<u64>) {
     let client_id = state.connected_clients.fetch_add(1, Ordering::Relaxed);
-    info!("WebSocket connected: client-{} (channel: {:?})", client_id, channel);
+    info!(
+        "WebSocket connected: client-{} (channel: {:?}, resume_from: {:?})",
+        client_id, channel, resume_from
+    );
 
-    let (mut sender, mut receiver) = socket.split();
+    let (ws_sender, mut receiver) = socket.split();
     let mut rx = state.event_broadcast.subscribe();
     let mut subscription = ClientSubscription::from_channel(&channel);
 
-    // ── Replay: send current state snapshot on connect ──
-    let replay_msgs = build_replay(&channel, &state);
-    if !replay_msgs.is_empty() {
-        for msg in &replay_msgs {
-            if let Ok(json) = serde_json::to_string(msg) {
-                if sender.send(Message::Text(json)).await.is_err() {
-                    state.connected_clients.fetch_sub(1, Ordering::Relaxed);
-                    info!("WebSocket disconnected during replay: client-{}", client_id);
-                    return;
-                }
+    // ── Backpressure: bounded channel between processor and WS sender ──
+    let (client_tx, mut client_rx) = mpsc::channel::<String>(CLIENT_SEND_BUFFER);
+
+    // Spawn a dedicated sender task that drains the bounded channel into the WS.
+    let send_task = tokio::spawn(async move {
+        let mut ws_sender = ws_sender;
+        while let Some(json) = client_rx.recv().await {
+            if ws_sender.send(Message::Text(json)).await.is_err() {
+                break;
             }
         }
-        info!("client-{} replay: sent {} messages", client_id, replay_msgs.len());
+        let _ = ws_sender.close().await;
+    });
+
+    // Helper: try_send with backpressure tracking
+    let mut drop_count: u64 = 0;
+    let mut total_sent: u64 = 0;
+    let mut send_or_drop = |client_tx: &mpsc::Sender<String>, json: String, client_id: usize, drop_count: &mut u64, total_sent: &mut u64| -> bool {
+        match client_tx.try_send(json) {
+            Ok(_) => {
+                *total_sent += 1;
+                true
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                *drop_count += 1;
+                if *drop_count % 1000 == 0 {
+                    warn!(
+                        "client-{}: backpressure — dropped {} messages (sent {})",
+                        client_id, drop_count, total_sent
+                    );
+                }
+                if *drop_count >= SLOW_CLIENT_DROP_LIMIT {
+                    warn!(
+                        "client-{}: disconnecting slow consumer ({} drops)",
+                        client_id, drop_count
+                    );
+                    return false; // signal disconnect
+                }
+                true
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    };
+
+    // ── Cursor resume OR snapshot replay ──
+    let mut last_sent_seqno: u64 = 0;
+
+    if let Some(cursor) = resume_from {
+        // Replay from history buffer: everything with seqno > cursor
+        let items: Vec<SequencedItem> = {
+            let history = state.event_history.lock().unwrap();
+            // Check if the cursor is still within the buffer
+            let oldest = history.front().map(|i| i.seqno).unwrap_or(0);
+            if cursor < oldest && oldest > 0 {
+                warn!(
+                    "client-{}: resume_from={} is too old (oldest buffered={}), sending full snapshot",
+                    client_id, cursor, oldest
+                );
+                // Fall through: empty vec → we'll send snapshot below
+                vec![]
+            } else {
+                history
+                    .iter()
+                    .filter(|i| i.seqno > cursor)
+                    .cloned()
+                    .collect()
+            }
+        };
+
+        if items.is_empty() && resume_from.is_some() {
+            // Cursor was too old or history was empty — fall back to snapshot
+            let replay_msgs = build_replay(&channel, &state);
+            let current_seqno = state.server_seqno.load(Ordering::Relaxed);
+            for msg in &replay_msgs {
+                let wire = WireMessage { server_seqno: current_seqno, message: msg };
+                if let Ok(json) = serde_json::to_string(&wire) {
+                    if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
+                        state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+                        send_task.abort();
+                        return;
+                    }
+                }
+            }
+            last_sent_seqno = current_seqno;
+            if !replay_msgs.is_empty() {
+                info!("client-{} snapshot replay (cursor too old): sent {} messages", client_id, replay_msgs.len());
+            }
+        } else {
+            // Replay buffered items, applying subscription filter
+            let mut replay_count: usize = 0;
+            let mut events_buf: Vec<SerializableEventData> = Vec::new();
+            let mut messages_buf: Vec<(u64, ServerMessage)> = Vec::new();
+
+            for si in &items {
+                process_item_with_seqno(
+                    si.seqno, &si.item, &subscription, &state.base_filter, &state,
+                    &mut events_buf, &mut messages_buf,
+                );
+                last_sent_seqno = si.seqno;
+            }
+
+            // Flush replay buffers
+            if !events_buf.is_empty() {
+                let msg = ServerMessage::Events(std::mem::take(&mut events_buf));
+                let wire = WireMessage { server_seqno: last_sent_seqno, message: &msg };
+                if let Ok(json) = serde_json::to_string(&wire) {
+                    replay_count += 1;
+                    if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
+                        state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+                        send_task.abort();
+                        return;
+                    }
+                }
+            }
+            for (seqno, msg) in std::mem::take(&mut messages_buf) {
+                let wire = WireMessage { server_seqno: seqno, message: &msg };
+                if let Ok(json) = serde_json::to_string(&wire) {
+                    replay_count += 1;
+                    if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
+                        state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+                        send_task.abort();
+                        return;
+                    }
+                }
+            }
+            info!(
+                "client-{} cursor resume: replayed {} items from seqno {} (sent {} wire messages)",
+                client_id,
+                items.len(),
+                cursor,
+                replay_count
+            );
+        }
+    } else {
+        // No cursor — send snapshot replay (existing behaviour)
+        let replay_msgs = build_replay(&channel, &state);
+        let current_seqno = state.server_seqno.load(Ordering::Relaxed);
+        if !replay_msgs.is_empty() {
+            for msg in &replay_msgs {
+                let wire = WireMessage { server_seqno: current_seqno, message: msg };
+                if let Ok(json) = serde_json::to_string(&wire) {
+                    if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
+                        state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+                        send_task.abort();
+                        return;
+                    }
+                }
+            }
+            last_sent_seqno = current_seqno;
+            info!("client-{} snapshot replay: sent {} messages", client_id, replay_msgs.len());
+        }
     }
 
+    // ── Live event loop ──
     let mut events_buf: Vec<SerializableEventData> = Vec::new();
-    let mut messages_buf: Vec<ServerMessage> = Vec::new();
+    let mut messages_buf: Vec<(u64, ServerMessage)> = Vec::new();
 
     loop {
         tokio::select! {
             event = rx.recv() => {
                 match event {
-                    Ok(item) => {
-                        process_item(&item, &subscription, &state.base_filter, &state, &mut events_buf, &mut messages_buf);
+                    Ok(si) => {
+                        // Skip items already sent during cursor replay
+                        if si.seqno <= last_sent_seqno {
+                            continue;
+                        }
+                        process_item_with_seqno(si.seqno, &si.item, &subscription, &state.base_filter, &state, &mut events_buf, &mut messages_buf);
 
                         // Drain available events without blocking
-                        while let Ok(item) = rx.try_recv() {
-                            process_item(&item, &subscription, &state.base_filter, &state, &mut events_buf, &mut messages_buf);
+                        while let Ok(si) = rx.try_recv() {
+                            if si.seqno <= last_sent_seqno {
+                                continue;
+                            }
+                            process_item_with_seqno(si.seqno, &si.item, &subscription, &state.base_filter, &state, &mut events_buf, &mut messages_buf);
                         }
 
                         // Send batched events
                         if !events_buf.is_empty() {
+                            // Use the seqno of the last item in messages_buf, or the si.seqno
+                            let batch_seqno = messages_buf.last().map(|(s,_)| *s).unwrap_or(si.seqno);
                             let msg = ServerMessage::Events(std::mem::take(&mut events_buf));
-                            if let Ok(json) = serde_json::to_string(&msg) {
-                                if sender.send(Message::Text(json)).await.is_err() {
+                            let wire = WireMessage { server_seqno: batch_seqno, message: &msg };
+                            if let Ok(json) = serde_json::to_string(&wire) {
+                                if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
                                     break;
                                 }
                             }
                         }
 
                         // Send metric messages
-                        for msg in std::mem::take(&mut messages_buf) {
-                            if let Ok(json) = serde_json::to_string(&msg) {
-                                if sender.send(Message::Text(json)).await.is_err() {
+                        for (seqno, msg) in std::mem::take(&mut messages_buf) {
+                            let wire = WireMessage { server_seqno: seqno, message: &msg };
+                            if let Ok(json) = serde_json::to_string(&wire) {
+                                if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
                                     break;
                                 }
                             }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("client-{} lagged by {} events", client_id, n);
+                        warn!("client-{} lagged by {} events in broadcast", client_id, n);
                     }
                     Err(_) => break,
                 }
@@ -452,17 +654,28 @@ async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel
         }
     }
 
+    // Cleanup: drop the sender so the send_task exits
+    drop(client_tx);
+    let _ = send_task.await;
     state.connected_clients.fetch_sub(1, Ordering::Relaxed);
-    info!("WebSocket disconnected: client-{}", client_id);
+    if drop_count > 0 {
+        info!(
+            "WebSocket disconnected: client-{} (sent: {}, dropped: {})",
+            client_id, total_sent, drop_count
+        );
+    } else {
+        info!("WebSocket disconnected: client-{}", client_id);
+    }
 }
 
-fn process_item(
+fn process_item_with_seqno(
+    seqno: u64,
     item: &EventDataOrMetrics,
     subscription: &ClientSubscription,
     base_filter: &EventFilter,
     state: &GatewayState,
     events_buf: &mut Vec<SerializableEventData>,
-    messages_buf: &mut Vec<ServerMessage>,
+    messages_buf: &mut Vec<(u64, ServerMessage)>,
 ) {
     match item {
         EventDataOrMetrics::Event(event_data) => {
@@ -479,22 +692,22 @@ fn process_item(
         }
         EventDataOrMetrics::TPS(tps) => {
             if subscription.include_tps {
-                messages_buf.push(ServerMessage::TPS(*tps));
+                messages_buf.push((seqno, ServerMessage::TPS(*tps)));
             }
         }
         EventDataOrMetrics::Contention(data) => {
             if subscription.include_contention {
-                messages_buf.push(ServerMessage::ContentionData(data.clone()));
+                messages_buf.push((seqno, ServerMessage::ContentionData(data.clone())));
             }
         }
         EventDataOrMetrics::TopAccesses(data) => {
             if subscription.include_top_accesses {
-                messages_buf.push(ServerMessage::TopAccesses(data.clone()));
+                messages_buf.push((seqno, ServerMessage::TopAccesses(data.clone())));
             }
         }
         EventDataOrMetrics::Lifecycle(update) => {
             if subscription.include_lifecycle {
-                messages_buf.push(ServerMessage::Lifecycle(update.clone()));
+                messages_buf.push((seqno, ServerMessage::Lifecycle(update.clone())));
             }
         }
     }
@@ -525,6 +738,7 @@ async fn rest_status(State(state): State<Arc<GatewayState>>) -> impl IntoRespons
         "connected_clients": state.connected_clients.load(Ordering::Relaxed),
         "uptime_secs": state.start_time.elapsed().as_secs(),
         "last_event_age_secs": now.saturating_sub(last),
+        "server_seqno": state.server_seqno.load(Ordering::Relaxed),
     }))
 }
 
@@ -564,7 +778,7 @@ async fn rest_block_lifecycle(
 
 async fn run_event_forwarder(
     mut event_receiver: tokio::sync::mpsc::Receiver<EventData>,
-    event_broadcast: broadcast::Sender<EventDataOrMetrics>,
+    event_broadcast: broadcast::Sender<SequencedItem>,
     tps_tx: watch::Sender<usize>,
     contention_tx: watch::Sender<Option<ContentionData>>,
     state: Arc<GatewayState>,
@@ -719,18 +933,32 @@ async fn run_event_forwarder(
                 }
 
                 // ── Broadcast: event first, then metrics ──
+                // Helper closure: assign seqno, store in history, broadcast
+                let mut broadcast_item = |item: EventDataOrMetrics, state: &Arc<GatewayState>, tx: &broadcast::Sender<SequencedItem>| {
+                    let seqno = state.server_seqno.fetch_add(1, Ordering::Relaxed) + 1;
+                    let si = SequencedItem { seqno, item };
+                    {
+                        let mut history = state.event_history.lock().unwrap();
+                        history.push_back(si.clone());
+                        while history.len() > MAX_EVENT_HISTORY {
+                            history.pop_front();
+                        }
+                    }
+                    let _ = tx.send(si);
+                };
+
                 let send_accesses = event_data.event_name == EventName::BlockEnd;
-                let _ = event_broadcast.send(EventDataOrMetrics::Event(event_data));
+                broadcast_item(EventDataOrMetrics::Event(event_data), &state, &event_broadcast);
 
                 if send_accesses {
-                    let _ = event_broadcast.send(EventDataOrMetrics::TopAccesses(TopAccessesData {
+                    broadcast_item(EventDataOrMetrics::TopAccesses(TopAccessesData {
                         account: account_accesses.top_k(10),
                         storage: storage_accesses.top_k(10),
-                    }));
+                    }), &state, &event_broadcast);
                 }
-                if let Some(e) = tps_event { let _ = event_broadcast.send(e); }
-                if let Some(e) = contention_event { let _ = event_broadcast.send(e); }
-                if let Some(e) = lifecycle_event { let _ = event_broadcast.send(e); }
+                if let Some(e) = tps_event { broadcast_item(e, &state, &event_broadcast); }
+                if let Some(e) = contention_event { broadcast_item(e, &state, &event_broadcast); }
+                if let Some(e) = lifecycle_event { broadcast_item(e, &state, &event_broadcast); }
             }
             _ = accesses_reset_interval.tick() => {
                 account_accesses.reset();
@@ -748,7 +976,7 @@ pub async fn run_server(
     addr: SocketAddr,
     event_receiver: tokio::sync::mpsc::Receiver<EventData>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (event_broadcast, _) = broadcast::channel::<EventDataOrMetrics>(1_000_000);
+    let (event_broadcast, _) = broadcast::channel::<SequencedItem>(1_000_000);
     let (tps_tx, tps_rx) = watch::channel(0usize);
     let (contention_tx, contention_rx) = watch::channel(None::<ContentionData>);
 
@@ -770,6 +998,8 @@ pub async fn run_server(
         last_event_time: AtomicU64::new(0),
         base_filter,
         lifecycle_tracker: RwLock::new(BlockLifecycleTracker::new()),
+        server_seqno: AtomicU64::new(0),
+        event_history: Mutex::new(VecDeque::with_capacity(MAX_EVENT_HISTORY)),
     });
 
     tokio::spawn(run_event_forwarder(
@@ -800,7 +1030,7 @@ pub async fn run_server(
         .route("/v1/blocks/:block_number/lifecycle", get(rest_block_lifecycle))
         // Health
         .route("/health", get(rest_health))
-        // Backward compat: root path = all events
+        // Backward compat: root path = all events (same handler, supports ?resume_from)
         .route("/", get(ws_all))
         .layer(cors)
         .with_state(state);

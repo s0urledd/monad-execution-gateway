@@ -65,6 +65,13 @@ export class GatewayClient {
   private baseUrl: string;
   private pendingSubscription: SimpleSubscribe | AdvancedSubscribe | null = null;
 
+  /**
+   * Tracks the last `server_seqno` received from the gateway.
+   * On reconnect this is sent as `?resume_from=<seqno>` so the server
+   * replays only the messages the client missed.
+   */
+  private lastServerSeqno: number | null = null;
+
   constructor(options: GatewayClientOptions) {
     this.options = {
       autoReconnect: true,
@@ -241,6 +248,11 @@ export class GatewayClient {
     return this.ws?.readyState === WebSocket.OPEN;
   }
 
+  /** Last server_seqno received — pass to `?resume_from` for cursor resume */
+  get serverSeqno(): number | null {
+    return this.lastServerSeqno;
+  }
+
   // ─── REST Helpers ────────────────────────────────────────────────────
 
   /**
@@ -308,15 +320,25 @@ export class GatewayClient {
 
   private buildWsUrl(): string {
     const channelPath = CHANNEL_PATHS[this.options.channel];
+    let wsUrl: string;
     try {
       const parsed = new URL(this.baseUrl);
       if (parsed.pathname && parsed.pathname !== "/") {
-        return this.baseUrl;
+        wsUrl = this.baseUrl;
+      } else {
+        wsUrl = `${this.baseUrl}${channelPath}`;
       }
     } catch {
-      // not a valid URL, just append
+      wsUrl = `${this.baseUrl}${channelPath}`;
     }
-    return `${this.baseUrl}${channelPath}`;
+
+    // Append resume_from cursor for seamless reconnect
+    if (this.lastServerSeqno !== null) {
+      const separator = wsUrl.includes("?") ? "&" : "?";
+      wsUrl = `${wsUrl}${separator}resume_from=${this.lastServerSeqno}`;
+    }
+
+    return wsUrl;
   }
 
   private sendRaw(data: string): void {
@@ -326,6 +348,11 @@ export class GatewayClient {
   }
 
   private handleMessage(msg: ServerMessage): void {
+    // Track cursor position for resume-on-reconnect
+    if (msg.server_seqno !== undefined) {
+      this.lastServerSeqno = msg.server_seqno;
+    }
+
     if ("Events" in msg) {
       this.emit("events", msg.Events);
       for (const event of msg.Events) {
