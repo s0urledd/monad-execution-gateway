@@ -23,8 +23,83 @@ All endpoints are served on a single port (default `8443`).
 | `GET /v1/contention` | Latest per-block contention data |
 | `GET /v1/blocks/lifecycle` | Lifecycle summaries for all tracked blocks |
 | `GET /v1/blocks/:number/lifecycle` | Full lifecycle timeline for a specific block |
-| `GET /v1/status` | Gateway status (block number, clients, uptime) |
+| `GET /v1/status` | Gateway status, cursor resume window |
 | `GET /health` | Health check for monitoring/orchestration |
+
+---
+
+## Wire Format
+
+Every message from the server is a JSON text frame with a `server_seqno` field and exactly one data key:
+
+```json
+{
+  "server_seqno": 12345,
+  "Events": [...]
+}
+```
+
+The `server_seqno` is a monotonic counter that uniquely identifies each wire message. Clients should track the last seen value and pass it back as `?resume_from=<seqno>` on reconnect.
+
+---
+
+## Cursor Resume
+
+All WebSocket endpoints accept an optional `resume_from` query parameter:
+
+```
+ws://host:8443/v1/ws?resume_from=12345
+```
+
+### How It Works
+
+1. The server keeps a ring buffer of the last 100,000 pre-serialized wire messages.
+2. On connect with `?resume_from=N`, the server replays all buffered messages with `server_seqno > N`.
+3. The first frame is always a `Resume` control message indicating the mode.
+
+### Resume Control Message
+
+Sent as the first frame after every connect/reconnect:
+
+```json
+{"server_seqno": 42, "Resume": {"mode": "resume"}}
+```
+
+| `mode` | Meaning |
+|--------|---------|
+| `"resume"` | Cursor was valid. Buffered messages follow — no data loss. |
+| `"snapshot"` | Cursor was too old or fresh connect. Snapshot state follows (TPS, contention, lifecycle). |
+
+### Checking the Resume Window
+
+Before connecting, clients can check if their cursor is still valid:
+
+```bash
+curl http://host:8443/v1/status
+```
+
+```json
+{
+  "server_seqno": 54321,
+  "oldest_seqno": 4321,
+  "newest_seqno": 54321,
+  ...
+}
+```
+
+If `your_cursor >= oldest_seqno`, resume will succeed. Otherwise you'll get a snapshot fallback.
+
+---
+
+## Backpressure
+
+Each WebSocket client gets a bounded send buffer of **4096 messages**. When the buffer is full (client consuming too slowly):
+
+- New messages are **dropped** (not queued)
+- Warning logged every 1,000 drops
+- Client **disconnected** after 10,000 cumulative drops
+
+On disconnect, the server logs `sent` and `dropped` counts. This prevents a single slow consumer from exhausting server memory.
 
 ---
 
@@ -34,9 +109,10 @@ All endpoints are served on a single port (default `8443`).
 
 ```
 ws://<GATEWAY_HOST>:8443/v1/ws
+ws://<GATEWAY_HOST>:8443/v1/ws?resume_from=12345
 ```
 
-No authentication required — connection is open. Once connected, the gateway immediately begins streaming events as JSON text frames.
+No authentication required. Once connected, the server sends a `Resume` control frame followed by live data.
 
 ### Channel Details
 
@@ -48,13 +124,13 @@ No authentication required — connection is open. Once connected, the gateway i
 
 **`/v1/ws/contention`** — Only `ContentionData` messages (per-block contention analytics).
 
-**`/v1/ws/lifecycle`** — Block stage transitions only. Each message is a `Lifecycle` update showing a block advancing through MonadBFT consensus: Proposed → Voted → Finalized → Verified. Compact, high-signal stream for finality monitoring.
+**`/v1/ws/lifecycle`** — Block stage transitions only. Each message is a `Lifecycle` update showing a block advancing through MonadBFT consensus.
 
 ### Client-Driven Subscriptions
 
-After connecting, clients can send a subscribe message to filter events server-side. This reduces bandwidth and processing on the client.
+After connecting, clients can send a subscribe message to filter events server-side.
 
-**Simple format** — list event names and metric types:
+**Simple format:**
 
 ```json
 {
@@ -62,7 +138,7 @@ After connecting, clients can send a subscribe message to filter events server-s
 }
 ```
 
-**Advanced format** — with field-level filters and/or stage-aware filtering:
+**Advanced format** — with field-level filters and stage-aware filtering:
 
 ```json
 {
@@ -78,23 +154,13 @@ After connecting, clients can send a subscribe message to filter events server-s
           }
         ]
       }
-    ]
-  }
-}
-```
-
-**Stage-aware filtering** — only receive events from blocks that have reached a minimum consensus stage:
-
-```json
-{
-  "subscribe": {
-    "events": ["TxnLog", "TxnEvmOutput"],
+    ],
     "min_stage": "Finalized"
   }
 }
 ```
 
-Valid `min_stage` values: `"Proposed"`, `"Voted"`, `"Finalized"`, `"Verified"`. Events from blocks that haven't reached the requested stage are silently dropped. Default: no stage filter (events streamed immediately).
+Valid `min_stage` values: `"Proposed"`, `"Voted"`, `"Finalized"`, `"Verified"`. Events from blocks that haven't reached the requested stage are silently dropped.
 
 **Supported field filters:**
 
@@ -118,32 +184,31 @@ Subscriptions replace the current filter. Send a new subscribe message to change
 
 ### Server Messages
 
-Every message is a JSON object with **exactly one** key indicating the message type:
+Every message is a JSON object with `server_seqno` and **exactly one** data key.
+
+#### `Resume`
+
+Control message, always the first frame after connect/reconnect.
+
+```json
+{"server_seqno": 0, "Resume": {"mode": "snapshot"}}
+```
 
 #### `Events`
 
-A batch of execution events from the Monad event ring.
+A batch of execution events.
 
 ```json
 {
+  "server_seqno": 42,
   "Events": [
     {
       "event_name": "BlockStart",
       "block_number": 56147820,
       "txn_idx": null,
       "txn_hash": null,
-      "payload": {
-        "type": "BlockStart",
-        "block_number": 56147820,
-        "block_id": "0x...",
-        "round": 12345,
-        "epoch": 100,
-        "parent_eth_hash": "0x...",
-        "timestamp": 1708345678,
-        "beneficiary": "0x...",
-        "gas_limit": 30000000,
-        "base_fee_per_gas": "0x..."
-      },
+      "commit_stage": "Proposed",
+      "payload": { "type": "BlockStart", ... },
       "seqno": 9876543210,
       "timestamp_ns": 1708345678000000000
     }
@@ -157,21 +222,15 @@ A batch of execution events from the Monad event ring.
 | `block_number` | number \| null | Block number (if applicable) |
 | `txn_idx` | number \| null | Transaction index within the block |
 | `txn_hash` | string \| null | Transaction hash (0x-prefixed) |
-| `commit_stage` | string \| null | Block's current consensus stage: `"Proposed"`, `"Voted"`, `"Finalized"`, `"Verified"`, or `"Rejected"` |
+| `commit_stage` | string \| null | Block's current consensus stage |
 | `payload` | object | Event-specific data (discriminated by `type` field) |
-| `seqno` | number | Monotonically increasing sequence number from the event ring |
+| `seqno` | number | Sequence number from the event ring |
 | `timestamp_ns` | number | Nanosecond-precision unix timestamp |
-
-The `commit_stage` field tells you the finality confidence of this event's block at the time it was processed. For example, a `TxnLog` event with `"commit_stage": "Finalized"` means the block is irreversibly committed.
 
 #### `TPS`
 
-Transactions per second computed over a 2.5-block rolling window (~1 second at Monad's ~400ms block time).
-
 ```json
-{
-  "TPS": 2450
-}
+{"server_seqno": 43, "TPS": 2450}
 ```
 
 #### `ContentionData`
@@ -180,6 +239,7 @@ Per-block storage contention analytics. Sent once per block on `BlockEnd`.
 
 ```json
 {
+  "server_seqno": 44,
   "ContentionData": {
     "block_number": 56147820,
     "block_wall_time_ns": 45000000,
@@ -189,65 +249,34 @@ Per-block storage contention analytics. Sent once per block on `BlockEnd`.
     "contended_slot_count": 42,
     "contention_ratio": 0.0275,
     "total_txn_count": 150,
-    "top_contended_slots": [
-      {
-        "address": "0x...",
-        "slot": "0x...",
-        "txn_count": 8,
-        "access_count": 15
-      }
-    ],
-    "top_contended_contracts": [
-      {
-        "address": "0x...",
-        "total_slots": 50,
-        "contended_slots": 12,
-        "total_accesses": 200,
-        "contention_score": 0.24
-      }
-    ],
-    "contract_edges": [
-      {
-        "contract_a": "0x...",
-        "contract_b": "0x...",
-        "shared_txn_count": 15
-      }
-    ]
+    "top_contended_slots": [...],
+    "top_contended_contracts": [...],
+    "contract_edges": [...]
   }
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `parallel_efficiency_pct` | Percentage of execution time saved by parallel execution (higher = better) |
-| `contention_ratio` | Fraction of storage slots accessed by 2+ transactions |
-| `top_contended_slots` | Up to 20 most contended storage slots (by txn_count) |
-| `top_contended_contracts` | Up to 15 contracts ranked by contention |
-| `contract_edges` | Up to 15 contract pairs frequently co-accessed in same transactions |
-
 #### `TopAccesses`
 
-Top accessed accounts and storage slots (probabilistic top-K using Space-Saving algorithm, reset every 5 minutes).
+Top accessed accounts and storage slots (Space-Saving algorithm, reset every 5 minutes).
 
 ```json
 {
+  "server_seqno": 45,
   "TopAccesses": {
-    "account": [
-      { "key": "0x...", "count": 15234 }
-    ],
-    "storage": [
-      { "key": ["0x...", "0x..."], "count": 8921 }
-    ]
+    "account": [{ "key": "0x...", "count": 15234 }],
+    "storage": [{ "key": ["0x...", "0x..."], "count": 8921 }]
   }
 }
 ```
 
 #### `Lifecycle`
 
-Block stage transition. Emitted when a block advances through MonadBFT consensus: Proposed → Voted → Finalized → Verified.
+Block stage transition through MonadBFT consensus.
 
 ```json
 {
+  "server_seqno": 46,
   "Lifecycle": {
     "block_hash": "0x...",
     "block_number": 56147820,
@@ -261,24 +290,13 @@ Block stage transition. Emitted when a block advances through MonadBFT consensus
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `block_hash` | string | Block hash (primary identifier) |
-| `block_number` | number | Block height |
-| `from_stage` | string \| null | Previous stage (null for `Proposed`) |
-| `to_stage` | string | New stage reached |
-| `time_in_previous_stage_ms` | number \| null | Time spent in previous stage (ms) |
-| `block_age_ms` | number | Total time since `Proposed` (ms) |
-| `txn_count` | number | Transactions in the block |
-| `gas_used` | number \| null | Gas used (available after execution) |
-
 **Block Stages** (MonadBFT consensus):
 
 | Stage | Meaning | Typical Timing |
 |-------|---------|----------------|
 | `Proposed` | Block proposed for execution | t=0 |
-| `Voted` | Quorum certificate received (2/3+ validators) | ~400ms (speculative finality) |
-| `Finalized` | Committed to canonical chain (irreversible) | ~800ms (full finality) |
+| `Voted` | Quorum certificate received (2/3+ validators) | ~400ms |
+| `Finalized` | Committed to canonical chain (irreversible) | ~800ms |
 | `Verified` | State root verified (terminal) | After finalization |
 | `Rejected` | Dropped at any point (terminal) | Varies |
 
@@ -288,19 +306,15 @@ Block stage transition. Emitted when a block advances through MonadBFT consensus
 
 ### `GET /v1/tps`
 
-Current TPS snapshot.
-
 ```json
 { "tps": 2450 }
 ```
 
 ### `GET /v1/contention`
 
-Latest per-block contention data (same schema as the `ContentionData` WebSocket message payload).
+Latest per-block contention data (same schema as `ContentionData` WebSocket message payload).
 
 ### `GET /v1/status`
-
-Gateway status.
 
 ```json
 {
@@ -308,7 +322,10 @@ Gateway status.
   "block_number": 56147820,
   "connected_clients": 12,
   "uptime_secs": 86400,
-  "last_event_age_secs": 0
+  "last_event_age_secs": 0,
+  "server_seqno": 54321,
+  "oldest_seqno": 4321,
+  "newest_seqno": 54321
 }
 ```
 
@@ -317,35 +334,17 @@ Gateway status.
 | `status` | `"healthy"` if events received within 10s, `"degraded"` otherwise |
 | `block_number` | Latest block number seen |
 | `connected_clients` | Number of active WebSocket connections |
+| `server_seqno` | Current (newest) server sequence number |
+| `oldest_seqno` | Oldest seqno still in the ring buffer (0 = buffer empty) |
+| `newest_seqno` | Newest seqno assigned (same as `server_seqno`) |
 
 ### `GET /v1/blocks/lifecycle`
 
-Lifecycle summaries for all recently tracked blocks.
-
-```json
-[
-  {
-    "block_hash": "0x...",
-    "block_number": 56147820,
-    "current_stage": "Verified",
-    "txn_count": 150,
-    "gas_used": 12500000,
-    "eth_block_hash": "0x...",
-    "stage_timings_ms": {
-      "Proposed": 0,
-      "Voted": 412.5,
-      "Finalized": 825.0,
-      "Verified": 900.3
-    },
-    "execution_time_ms": 45.2,
-    "total_age_ms": 900.3
-  }
-]
-```
+Lifecycle summaries for all recently tracked blocks. Returns an array of `BlockLifecycleSummary` objects.
 
 ### `GET /v1/blocks/:number/lifecycle`
 
-Full lifecycle for a specific block by block number. Returns a single `BlockLifecycleSummary` object (same schema as above). Returns 404 if the block is not in the tracker's window.
+Full lifecycle for a specific block by block number. Returns 404 if the block is not in the tracker's window.
 
 ### `GET /health`
 

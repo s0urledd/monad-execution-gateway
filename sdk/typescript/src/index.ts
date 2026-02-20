@@ -27,6 +27,8 @@ export type {
   BlockStage,
   BlockLifecycleUpdate,
   BlockLifecycleSummary,
+  // Resume control
+  ResumeMode,
   // Metrics
   ContentionData,
   ContendedSlotEntry,

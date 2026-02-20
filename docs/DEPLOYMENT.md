@@ -96,12 +96,23 @@ curl http://localhost:8443/health
 - Returns `false` if no events received in 10 seconds
 - Process exits if no events for 30 seconds (triggers Docker restart)
 
-Additional status endpoint:
+Additional status endpoint (includes cursor resume window):
 
 ```bash
 curl http://localhost:8443/v1/status
-# {"status":"healthy","block_number":56147820,"connected_clients":3,"uptime_secs":86400,"last_event_age_secs":0}
+# {
+#   "status":"healthy",
+#   "block_number":56147820,
+#   "connected_clients":3,
+#   "uptime_secs":86400,
+#   "last_event_age_secs":0,
+#   "server_seqno":54321,
+#   "oldest_seqno":4321,
+#   "newest_seqno":54321
+# }
 ```
+
+The `oldest_seqno` / `newest_seqno` fields tell clients the cursor resume window. See [Cursor Resume](API.md#cursor-resume) for details.
 
 ## Systemd Service (Alternative to Docker)
 
