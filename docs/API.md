@@ -12,6 +12,7 @@ All endpoints are served on a single port (default `8443`).
 | `/v1/ws/blocks` | Block lifecycle events + TPS |
 | `/v1/ws/txs` | Transaction events only |
 | `/v1/ws/contention` | Contention data only |
+| `/v1/ws/lifecycle` | Block stage transitions only (Proposed/Voted/Finalized/Verified) |
 | `/` | Alias for `/v1/ws` (backward compatible) |
 
 ### REST Endpoints
@@ -20,6 +21,8 @@ All endpoints are served on a single port (default `8443`).
 |----------|-------------|
 | `GET /v1/tps` | Current TPS snapshot |
 | `GET /v1/contention` | Latest per-block contention data |
+| `GET /v1/blocks/lifecycle` | Lifecycle summaries for all tracked blocks |
+| `GET /v1/blocks/:number/lifecycle` | Full lifecycle timeline for a specific block |
 | `GET /v1/status` | Gateway status (block number, clients, uptime) |
 | `GET /health` | Health check for monitoring/orchestration |
 
@@ -45,6 +48,8 @@ No authentication required — connection is open. Once connected, the gateway i
 
 **`/v1/ws/contention`** — Only `ContentionData` messages (per-block contention analytics).
 
+**`/v1/ws/lifecycle`** — Block stage transitions only. Each message is a `Lifecycle` update showing a block advancing through MonadBFT consensus: Proposed → Voted → Finalized → Verified. Compact, high-signal stream for finality monitoring.
+
 ### Client-Driven Subscriptions
 
 After connecting, clients can send a subscribe message to filter events server-side. This reduces bandwidth and processing on the client.
@@ -57,7 +62,7 @@ After connecting, clients can send a subscribe message to filter events server-s
 }
 ```
 
-**Advanced format** — with field-level filters (matches server's `EventFilterSpec` format):
+**Advanced format** — with field-level filters and/or stage-aware filtering:
 
 ```json
 {
@@ -78,6 +83,19 @@ After connecting, clients can send a subscribe message to filter events server-s
 }
 ```
 
+**Stage-aware filtering** — only receive events from blocks that have reached a minimum consensus stage:
+
+```json
+{
+  "subscribe": {
+    "events": ["TxnLog", "TxnEvmOutput"],
+    "min_stage": "Finalized"
+  }
+}
+```
+
+Valid `min_stage` values: `"Proposed"`, `"Voted"`, `"Finalized"`, `"Verified"`. Events from blocks that haven't reached the requested stage are silently dropped. Default: no stage filter (events streamed immediately).
+
 **Supported field filters:**
 
 | Field | Filter Type | Applies To | Example |
@@ -94,6 +112,7 @@ Multiple field filters within a spec are combined with **AND** logic. Multiple f
 - `TPS` — TPS metric updates
 - `ContentionData` — Per-block contention analytics
 - `TopAccesses` — Top accessed accounts and storage slots
+- `Lifecycle` — Block stage transition updates
 
 Subscriptions replace the current filter. Send a new subscribe message to change what you receive.
 
@@ -138,9 +157,12 @@ A batch of execution events from the Monad event ring.
 | `block_number` | number \| null | Block number (if applicable) |
 | `txn_idx` | number \| null | Transaction index within the block |
 | `txn_hash` | string \| null | Transaction hash (0x-prefixed) |
+| `commit_stage` | string \| null | Block's current consensus stage: `"Proposed"`, `"Voted"`, `"Finalized"`, `"Verified"`, or `"Rejected"` |
 | `payload` | object | Event-specific data (discriminated by `type` field) |
 | `seqno` | number | Monotonically increasing sequence number from the event ring |
 | `timestamp_ns` | number | Nanosecond-precision unix timestamp |
+
+The `commit_stage` field tells you the finality confidence of this event's block at the time it was processed. For example, a `TxnLog` event with `"commit_stage": "Finalized"` means the block is irreversibly committed.
 
 #### `TPS`
 
@@ -220,6 +242,46 @@ Top accessed accounts and storage slots (probabilistic top-K using Space-Saving 
 }
 ```
 
+#### `Lifecycle`
+
+Block stage transition. Emitted when a block advances through MonadBFT consensus: Proposed → Voted → Finalized → Verified.
+
+```json
+{
+  "Lifecycle": {
+    "block_hash": "0x...",
+    "block_number": 56147820,
+    "from_stage": "Proposed",
+    "to_stage": "Voted",
+    "time_in_previous_stage_ms": 412.5,
+    "block_age_ms": 412.5,
+    "txn_count": 150,
+    "gas_used": null
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `block_hash` | string | Block hash (primary identifier) |
+| `block_number` | number | Block height |
+| `from_stage` | string \| null | Previous stage (null for `Proposed`) |
+| `to_stage` | string | New stage reached |
+| `time_in_previous_stage_ms` | number \| null | Time spent in previous stage (ms) |
+| `block_age_ms` | number | Total time since `Proposed` (ms) |
+| `txn_count` | number | Transactions in the block |
+| `gas_used` | number \| null | Gas used (available after execution) |
+
+**Block Stages** (MonadBFT consensus):
+
+| Stage | Meaning | Typical Timing |
+|-------|---------|----------------|
+| `Proposed` | Block proposed for execution | t=0 |
+| `Voted` | Quorum certificate received (2/3+ validators) | ~400ms (speculative finality) |
+| `Finalized` | Committed to canonical chain (irreversible) | ~800ms (full finality) |
+| `Verified` | State root verified (terminal) | After finalization |
+| `Rejected` | Dropped at any point (terminal) | Varies |
+
 ---
 
 ## REST
@@ -255,6 +317,35 @@ Gateway status.
 | `status` | `"healthy"` if events received within 10s, `"degraded"` otherwise |
 | `block_number` | Latest block number seen |
 | `connected_clients` | Number of active WebSocket connections |
+
+### `GET /v1/blocks/lifecycle`
+
+Lifecycle summaries for all recently tracked blocks.
+
+```json
+[
+  {
+    "block_hash": "0x...",
+    "block_number": 56147820,
+    "current_stage": "Verified",
+    "txn_count": 150,
+    "gas_used": 12500000,
+    "eth_block_hash": "0x...",
+    "stage_timings_ms": {
+      "Proposed": 0,
+      "Voted": 412.5,
+      "Finalized": 825.0,
+      "Verified": 900.3
+    },
+    "execution_time_ms": 45.2,
+    "total_age_ms": 900.3
+  }
+]
+```
+
+### `GET /v1/blocks/:number/lifecycle`
+
+Full lifecycle for a specific block by block number. Returns a single `BlockLifecycleSummary` object (same schema as above). Returns 404 if the block is not in the tracker's window.
 
 ### `GET /health`
 

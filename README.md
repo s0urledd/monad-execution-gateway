@@ -7,6 +7,8 @@ Community-maintained public Execution Events Gateway for Monad builders. Real-ti
 | Data | Standard RPC | This Gateway |
 |------|:---:|:---:|
 | Block headers, logs, tx receipts | yes | yes |
+| Block lifecycle stages (Proposed/Voted/Finalized/Verified) | — | yes |
+| Per-event commit stage (finality confidence) | — | yes |
 | Per-tx storage slot reads/writes | — | yes |
 | Account access patterns | — | yes |
 | Parallel execution efficiency | — | yes |
@@ -42,12 +44,16 @@ See [Deployment Guide](docs/DEPLOYMENT.md) for detailed setup instructions.
 # All events
 websocat ws://your-validator:8443/v1/ws
 
-# Blocks only
+# Block lifecycle only (Proposed → Voted → Finalized → Verified)
+websocat ws://your-validator:8443/v1/ws/lifecycle
+
+# Blocks + TPS
 websocat ws://your-validator:8443/v1/ws/blocks
 
-# REST snapshot
+# REST snapshots
 curl http://your-validator:8443/v1/tps
 curl http://your-validator:8443/v1/status
+curl http://your-validator:8443/v1/blocks/lifecycle
 ```
 
 ```typescript
@@ -56,27 +62,32 @@ import { GatewayClient } from "@monad-labs/execution-events";
 
 const client = new GatewayClient({
   url: "ws://your-validator:8443",
-  channel: "blocks",   // "all" | "blocks" | "txs" | "contention"
+  channel: "lifecycle",   // "all" | "blocks" | "txs" | "contention" | "lifecycle"
 });
 
+// Watch blocks progress through consensus stages
+client.on("lifecycle", (update) => {
+  console.log(`Block ${update.block_number}: ${update.to_stage} (${update.block_age_ms}ms)`);
+});
+
+// Every event carries its block's current commit stage
 client.on("event", (event) => {
-  console.log(event.event_name, event.payload);
+  console.log(event.event_name, event.commit_stage, event.payload);
 });
 
-client.on("tps", (tps) => {
-  console.log("TPS:", tps);
-});
+client.on("tps", (tps) => console.log("TPS:", tps));
 
 await client.connect();
 
-// Refine with client-driven subscriptions
-client.subscribe(["BlockFinalized", "TPS"]);
+// Only receive events from finalized blocks
+client.subscribe({ events: ["TxnLog"], min_stage: "Finalized" });
 ```
 
 ```typescript
 // REST helpers (no WebSocket needed)
 const { tps } = await GatewayClient.fetchTPS("http://your-validator:8443");
 const status = await GatewayClient.fetchStatus("http://your-validator:8443");
+const lifecycle = await GatewayClient.fetchLifecycle("http://your-validator:8443");
 ```
 
 ## API Endpoints
@@ -89,8 +100,11 @@ All endpoints served on a single port (default `8443`):
 | `/v1/ws/blocks` | WebSocket | Block lifecycle events + TPS |
 | `/v1/ws/txs` | WebSocket | Transaction events only |
 | `/v1/ws/contention` | WebSocket | Contention data only |
+| `/v1/ws/lifecycle` | WebSocket | Block stage transitions only (Proposed/Voted/Finalized/Verified) |
 | `/v1/tps` | REST | Current TPS snapshot |
 | `/v1/contention` | REST | Latest per-block contention data |
+| `/v1/blocks/lifecycle` | REST | Lifecycle summaries for recent blocks |
+| `/v1/blocks/:number/lifecycle` | REST | Full lifecycle for a specific block |
 | `/v1/status` | REST | Gateway status |
 | `/health` | REST | Health check |
 
@@ -112,23 +126,27 @@ Monad Validator Node
          │ mpsc channel (100K buffer)
          ▼
 ┌─────────────────────┐
-│  Event Forwarder     │  Computes: TPS, contention, top-K accesses
+│  Event Forwarder     │  Lifecycle tracker + TPS + contention + top-K
+│  ├─ BlockLifecycle   │  Tracks Proposed→Voted→Finalized→Verified
+│  └─ commit_stage     │  Attaches finality info to every event
 └────────┬────────────┘
          │ broadcast channel (1M buffer)
          ▼
 ┌─────────────────────┐
 │  axum Server :8443   │
-│  ├─ /v1/ws/*         │  Multi-channel WebSocket + subscriptions
+│  ├─ /v1/ws/*         │  5 WebSocket channels + subscriptions
+│  ├─ /v1/ws/lifecycle │  Block stage transitions
+│  ├─ /v1/blocks/*     │  Lifecycle REST queries
 │  ├─ /v1/tps          │  REST snapshots
-│  ├─ /v1/contention   │
-│  ├─ /v1/status       │
-│  └─ /health          │  Health check (merged)
+│  └─ /health          │  Health check
 └─────────────────────┘
 ```
 
 ## Computed Metrics
 
-The gateway computes three real-time analytics on the server side:
+The gateway computes real-time analytics on the server side:
+
+**Block Lifecycle** — Tracks each block through MonadBFT consensus stages: Proposed → Voted (~400ms, speculative finality) → Finalized (~800ms, full finality) → Verified (state root confirmed). Every event carries its block's `commit_stage` so clients know finality confidence.
 
 **TPS** — 2.5-block rolling window transaction count (~1 second at Monad's ~400ms block time)
 
@@ -150,7 +168,8 @@ The gateway computes three real-time analytics on the server side:
 
 | Example | Description |
 |---------|-------------|
-| [subscribe-blocks.ts](examples/subscribe-blocks.ts) | Track block lifecycle via `/v1/ws/blocks` channel |
+| [track-lifecycle.ts](examples/track-lifecycle.ts) | Watch blocks through Proposed/Voted/Finalized/Verified stages |
+| [subscribe-blocks.ts](examples/subscribe-blocks.ts) | Track block events via `/v1/ws/blocks` channel |
 | [monitor-contention.ts](examples/monitor-contention.ts) | Monitor parallel execution via `/v1/ws/contention` channel |
 | [track-storage.ts](examples/track-storage.ts) | Watch storage access with client-driven subscriptions |
 | [websocket-test.sh](examples/websocket-test.sh) | Quick CLI test with websocat |

@@ -218,6 +218,60 @@ export type ExecEventPayload =
   | EvmErrorPayload
   | EmptyPayload;
 
+// ─── Block Commit Stages ────────────────────────────────────────────
+
+/**
+ * Public block commit stages aligned with Monad's MonadBFT consensus.
+ *
+ * Happy path: Proposed → Voted → Finalized → Verified
+ *
+ * Timing:
+ *   Proposed  → block proposed for execution
+ *   Voted     → quorum certificate received (~400ms, speculative finality)
+ *   Finalized → committed to canonical chain (~800ms, full finality)
+ *   Verified  → state root verified (terminal)
+ *   Rejected  → dropped at any point (terminal)
+ */
+export type BlockStage =
+  | "Proposed"
+  | "Voted"
+  | "Finalized"
+  | "Verified"
+  | "Rejected";
+
+/**
+ * Emitted on every block stage transition via the /v1/ws/lifecycle channel
+ * and also included in the "all" and "blocks" channels.
+ */
+export interface BlockLifecycleUpdate {
+  block_hash: string;
+  block_number: number;
+  from_stage?: BlockStage;
+  to_stage: BlockStage;
+  /** Milliseconds spent in the previous stage */
+  time_in_previous_stage_ms?: number;
+  /** Total elapsed time since Proposed (ms) */
+  block_age_ms: number;
+  txn_count: number;
+  gas_used?: number;
+}
+
+/**
+ * Full lifecycle summary for a single block (REST response).
+ */
+export interface BlockLifecycleSummary {
+  block_hash: string;
+  block_number: number;
+  current_stage: BlockStage;
+  txn_count: number;
+  gas_used?: number;
+  eth_block_hash?: string;
+  /** Milliseconds from Proposed to each stage reached */
+  stage_timings_ms: Partial<Record<BlockStage, number>>;
+  execution_time_ms?: number;
+  total_age_ms?: number;
+}
+
 // ─── Event Wrapper ──────────────────────────────────────────────────
 
 export interface ExecEvent {
@@ -225,6 +279,8 @@ export interface ExecEvent {
   block_number?: number;
   txn_idx?: number;
   txn_hash?: string;
+  /** Current public commit stage of this event's block */
+  commit_stage?: BlockStage;
   payload: ExecEventPayload;
   seqno: number;
   timestamp_ns: number;
@@ -283,11 +339,12 @@ export type ServerMessage =
   | { Events: ExecEvent[] }
   | { TopAccesses: TopAccessesData }
   | { TPS: number }
-  | { ContentionData: ContentionData };
+  | { ContentionData: ContentionData }
+  | { Lifecycle: BlockLifecycleUpdate };
 
 // ─── Channels ───────────────────────────────────────────────────────
 
-export type Channel = "all" | "blocks" | "txs" | "contention";
+export type Channel = "all" | "blocks" | "txs" | "contention" | "lifecycle";
 
 // ─── Subscription Protocol ──────────────────────────────────────────
 
@@ -347,6 +404,8 @@ export interface AdvancedSubscribe {
   subscribe: {
     events: string[];
     filters?: EventFilterSpec[];
+    /** Only deliver events from blocks at or above this commit stage */
+    min_stage?: BlockStage;
   };
 }
 
@@ -365,6 +424,8 @@ export interface StatusResponse {
   uptime_secs: number;
   last_event_age_secs: number;
 }
+
+export interface LifecycleResponse extends Array<BlockLifecycleSummary> {}
 
 // ─── Client Options ─────────────────────────────────────────────────
 
@@ -389,6 +450,7 @@ export interface GatewayClientEvents {
   tps: (tps: number) => void;
   contention: (data: ContentionData) => void;
   topAccesses: (data: TopAccessesData) => void;
+  lifecycle: (update: BlockLifecycleUpdate) => void;
   connected: () => void;
   disconnected: () => void;
   error: (error: Error) => void;

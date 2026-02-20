@@ -2,11 +2,40 @@
 
 Monad's execution engine emits structured events from the EVM in real-time via a memory-mapped ring buffer. These events provide **execution-level visibility** that is not available through standard Ethereum JSON-RPC.
 
+## Event Envelope
+
+Every event is wrapped in an envelope with metadata:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event_name` | string | Event type identifier |
+| `block_number` | number \| null | Block height |
+| `txn_idx` | number \| null | Transaction index within block |
+| `txn_hash` | string \| null | Transaction hash (0x-prefixed) |
+| `commit_stage` | string \| null | Block's current consensus stage (see below) |
+| `seqno` | number | Sequence number from the event ring |
+| `timestamp_ns` | number | Nanosecond-precision unix timestamp |
+| `payload` | object | Event-specific data (discriminated by `type` field) |
+
+### `commit_stage` — Finality Confidence
+
+Every event carries its block's current `commit_stage`, indicating how far the block has progressed through MonadBFT consensus:
+
+| Stage | Meaning | Use Case |
+|-------|---------|----------|
+| `Proposed` | Block proposed, execution started | Lowest latency, speculative |
+| `Voted` | QC received (~400ms) | Speculative finality, safe for most reads |
+| `Finalized` | Irreversibly committed (~800ms) | Full finality, safe for state changes |
+| `Verified` | State root verified | Terminal confirmation |
+| `Rejected` | Block dropped | Discard associated data |
+
+Use `min_stage` in subscriptions to only receive events from blocks at or above a specific stage. For example, `"min_stage": "Finalized"` ensures you only process events from irreversibly committed blocks.
+
 ## Block Lifecycle Events
 
 ### `BlockStart`
 
-Emitted when block execution begins.
+Emitted when block execution begins. Triggers the **Proposed** lifecycle stage.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -22,7 +51,7 @@ Emitted when block execution begins.
 
 ### `BlockEnd`
 
-Emitted when block execution completes.
+Emitted when block execution completes. Updates internal execution metadata (gas_used, eth_block_hash) but does **not** change the public lifecycle stage.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -34,7 +63,7 @@ Emitted when block execution completes.
 
 ### `BlockQC`
 
-Emitted when the block receives a Quorum Certificate (2/3+ validator votes).
+Emitted when the block receives a Quorum Certificate (2/3+ validator votes). Triggers the **Voted** lifecycle stage (~400ms, speculative finality).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -44,7 +73,7 @@ Emitted when the block receives a Quorum Certificate (2/3+ validator votes).
 
 ### `BlockFinalized`
 
-Emitted when the block is finalized (irreversible).
+Emitted when the block is finalized (irreversible). Triggers the **Finalized** lifecycle stage (~800ms, full finality).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -53,7 +82,7 @@ Emitted when the block is finalized (irreversible).
 
 ### `BlockVerified`
 
-Emitted when block execution results are verified.
+Emitted when block execution results are verified. Triggers the **Verified** lifecycle stage (terminal).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -61,7 +90,7 @@ Emitted when block execution results are verified.
 
 ### `BlockReject`
 
-Emitted when a block proposal is rejected.
+Emitted when a block proposal is rejected. Triggers the **Rejected** lifecycle stage (terminal).
 
 | Field | Type | Description |
 |-------|------|-------------|

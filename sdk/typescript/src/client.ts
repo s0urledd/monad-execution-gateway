@@ -7,6 +7,9 @@ import type {
   EventName,
   ContentionData,
   TopAccessesData,
+  BlockLifecycleUpdate,
+  BlockLifecycleSummary,
+  BlockStage,
   Channel,
   SimpleSubscribe,
   AdvancedSubscribe,
@@ -23,6 +26,7 @@ const CHANNEL_PATHS: Record<Channel, string> = {
   blocks: "/v1/ws/blocks",
   txs: "/v1/ws/txs",
   contention: "/v1/ws/contention",
+  lifecycle: "/v1/ws/lifecycle",
 };
 
 /**
@@ -162,7 +166,7 @@ export class GatewayClient {
    * ```
    */
   subscribe(
-    sub: string[] | { events: string[]; filters?: EventFilterSpec[] }
+    sub: string[] | { events: string[]; filters?: EventFilterSpec[]; min_stage?: BlockStage }
   ): void {
     let msg: SimpleSubscribe | AdvancedSubscribe;
 
@@ -188,6 +192,7 @@ export class GatewayClient {
    * - `"tps"` — TPS update (2.5-block rolling window)
    * - `"contention"` — Per-block contention analytics
    * - `"topAccesses"` — Top accessed accounts and storage slots
+   * - `"lifecycle"` — Block stage transition (Proposed/Voted/Finalized/Verified)
    * - `"connected"` / `"disconnected"` — Connection state
    * - `"error"` — WebSocket errors
    */
@@ -281,6 +286,24 @@ export class GatewayClient {
     return res.json() as Promise<StatusResponse>;
   }
 
+  /**
+   * Fetch lifecycle summaries for all recent blocks.
+   */
+  static async fetchLifecycle(baseUrl: string): Promise<BlockLifecycleSummary[]> {
+    const url = baseUrl.replace(/\/+$/, "");
+    const res = await fetch(`${url}/v1/blocks/lifecycle`);
+    return res.json() as Promise<BlockLifecycleSummary[]>;
+  }
+
+  /**
+   * Fetch the full lifecycle for a specific block.
+   */
+  static async fetchBlockLifecycle(baseUrl: string, blockNumber: number): Promise<BlockLifecycleSummary> {
+    const url = baseUrl.replace(/\/+$/, "");
+    const res = await fetch(`${url}/v1/blocks/${blockNumber}/lifecycle`);
+    return res.json() as Promise<BlockLifecycleSummary>;
+  }
+
   // ─── Private ──────────────────────────────────────────────────────
 
   private buildWsUrl(): string {
@@ -314,6 +337,8 @@ export class GatewayClient {
       this.emit("contention", msg.ContentionData);
     } else if ("TopAccesses" in msg) {
       this.emit("topAccesses", msg.TopAccesses);
+    } else if ("Lifecycle" in msg) {
+      this.emit("lifecycle", msg.Lifecycle);
     }
   }
 
