@@ -316,6 +316,63 @@ async fn ws_lifecycle(ws: WebSocketUpgrade, State(state): State<Arc<GatewayState
     ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Lifecycle))
 }
 
+/// Build a snapshot of current gateway state to send on WebSocket connect.
+/// This lets new clients immediately see in-progress blocks, current TPS, etc.
+fn build_replay(channel: &Channel, state: &GatewayState) -> Vec<ServerMessage> {
+    let mut msgs = Vec::new();
+
+    match channel {
+        Channel::All => {
+            // TPS
+            let tps = *state.tps.borrow();
+            if tps > 0 {
+                msgs.push(ServerMessage::TPS(tps));
+            }
+            // Latest contention
+            if let Some(data) = state.contention.borrow().clone() {
+                msgs.push(ServerMessage::ContentionData(data));
+            }
+            // Active lifecycle blocks
+            if let Ok(lc) = state.lifecycle_tracker.read() {
+                for update in lc.get_active_updates() {
+                    msgs.push(ServerMessage::Lifecycle(update));
+                }
+            }
+        }
+        Channel::Blocks => {
+            // TPS
+            let tps = *state.tps.borrow();
+            if tps > 0 {
+                msgs.push(ServerMessage::TPS(tps));
+            }
+            // Active lifecycle blocks
+            if let Ok(lc) = state.lifecycle_tracker.read() {
+                for update in lc.get_active_updates() {
+                    msgs.push(ServerMessage::Lifecycle(update));
+                }
+            }
+        }
+        Channel::Lifecycle => {
+            // Active lifecycle blocks
+            if let Ok(lc) = state.lifecycle_tracker.read() {
+                for update in lc.get_active_updates() {
+                    msgs.push(ServerMessage::Lifecycle(update));
+                }
+            }
+        }
+        Channel::Contention => {
+            if let Some(data) = state.contention.borrow().clone() {
+                msgs.push(ServerMessage::ContentionData(data));
+            }
+        }
+        Channel::Transactions => {
+            // No meaningful state to replay for raw transaction events
+        }
+    }
+
+    msgs
+}
+
 async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel) {
     let client_id = state.connected_clients.fetch_add(1, Ordering::Relaxed);
     info!("WebSocket connected: client-{} (channel: {:?})", client_id, channel);
@@ -323,6 +380,21 @@ async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.event_broadcast.subscribe();
     let mut subscription = ClientSubscription::from_channel(&channel);
+
+    // ── Replay: send current state snapshot on connect ──
+    let replay_msgs = build_replay(&channel, &state);
+    if !replay_msgs.is_empty() {
+        for msg in &replay_msgs {
+            if let Ok(json) = serde_json::to_string(msg) {
+                if sender.send(Message::Text(json)).await.is_err() {
+                    state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+                    info!("WebSocket disconnected during replay: client-{}", client_id);
+                    return;
+                }
+            }
+        }
+        info!("client-{} replay: sent {} messages", client_id, replay_msgs.len());
+    }
 
     let mut events_buf: Vec<SerializableEventData> = Vec::new();
     let mut messages_buf: Vec<ServerMessage> = Vec::new();
