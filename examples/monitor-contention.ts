@@ -13,7 +13,7 @@
  *   npx ts-node examples/monitor-contention.ts ws://your-validator:8443
  */
 
-import { GatewayClient } from "../sdk/typescript/src/index";
+import { GatewayClient } from "../sdk/typescript/src";
 
 const url = process.argv[2] || "ws://127.0.0.1:8443";
 const client = new GatewayClient({ url, channel: "contention" });
