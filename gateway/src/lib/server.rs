@@ -50,6 +50,14 @@ pub enum ServerMessage {
     TPS(usize),
     ContentionData(ContentionData),
     Lifecycle(BlockLifecycleUpdate),
+    /// Control message sent as the first frame after connect.
+    /// `mode` is `"resume"` (cursor hit) or `"snapshot"` (full state replay).
+    Resume(ResumeMode),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeMode {
+    pub mode: String,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -76,6 +84,14 @@ const SLOW_CLIENT_DROP_LIMIT: u64 = 10_000;
 struct SequencedItem {
     seqno: u64,
     item: EventDataOrMetrics,
+}
+
+/// Ring buffer entry: pre-serialized JSON ready to replay byte-for-byte.
+/// Avoids re-processing and re-serializing on cursor resume.
+#[derive(Clone)]
+struct ReplayEntry {
+    seqno: u64,
+    json: String,
 }
 
 /// Wire wrapper: every JSON message sent to clients carries a `server_seqno`.
@@ -113,8 +129,8 @@ pub struct GatewayState {
     pub lifecycle_tracker: RwLock<BlockLifecycleTracker>,
     /// Monotonic counter for server-level message sequencing.
     pub server_seqno: AtomicU64,
-    /// Ring buffer of recent broadcast items for cursor-resume.
-    pub event_history: Mutex<VecDeque<SequencedItem>>,
+    /// Ring buffer of pre-serialized wire messages for zero-cost cursor-resume.
+    pub event_history: Mutex<VecDeque<ReplayEntry>>,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -477,113 +493,93 @@ async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel
         }
     };
 
+    // ── Helper: send a control frame and bail on failure ──
+    macro_rules! send_control {
+        ($msg:expr) => {
+            let wire = WireMessage { server_seqno: state.server_seqno.load(Ordering::Relaxed), message: &$msg };
+            if let Ok(json) = serde_json::to_string(&wire) {
+                if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
+                    state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+                    send_task.abort();
+                    return;
+                }
+            }
+        };
+    }
+
+    // ── Helper: send snapshot replay (TPS / contention / lifecycle state) ──
+    let send_snapshot = |client_tx: &mpsc::Sender<String>, state: &Arc<GatewayState>, channel: &Channel,
+                         client_id: usize, drop_count: &mut u64, total_sent: &mut u64| -> bool {
+        let replay_msgs = build_replay(channel, state);
+        let current_seqno = state.server_seqno.load(Ordering::Relaxed);
+        for msg in &replay_msgs {
+            let wire = WireMessage { server_seqno: current_seqno, message: msg };
+            if let Ok(json) = serde_json::to_string(&wire) {
+                if !send_or_drop(client_tx, json, client_id, drop_count, total_sent) {
+                    return false;
+                }
+            }
+        }
+        if !replay_msgs.is_empty() {
+            info!("client-{} snapshot: sent {} state messages", client_id, replay_msgs.len());
+        }
+        true
+    };
+
     // ── Cursor resume OR snapshot replay ──
     let mut last_sent_seqno: u64 = 0;
 
     if let Some(cursor) = resume_from {
-        // Replay from history buffer: everything with seqno > cursor
-        let items: Vec<SequencedItem> = {
+        // Try to replay pre-serialized entries from ring buffer
+        let entries: Vec<ReplayEntry> = {
             let history = state.event_history.lock().unwrap();
-            // Check if the cursor is still within the buffer
-            let oldest = history.front().map(|i| i.seqno).unwrap_or(0);
+            let oldest = history.front().map(|e| e.seqno).unwrap_or(0);
             if cursor < oldest && oldest > 0 {
                 warn!(
-                    "client-{}: resume_from={} is too old (oldest buffered={}), sending full snapshot",
+                    "client-{}: resume_from={} too old (oldest={}), falling back to snapshot",
                     client_id, cursor, oldest
                 );
-                // Fall through: empty vec → we'll send snapshot below
                 vec![]
             } else {
-                history
-                    .iter()
-                    .filter(|i| i.seqno > cursor)
-                    .cloned()
-                    .collect()
+                history.iter().filter(|e| e.seqno > cursor).cloned().collect()
             }
         };
 
-        if items.is_empty() && resume_from.is_some() {
-            // Cursor was too old or history was empty — fall back to snapshot
-            let replay_msgs = build_replay(&channel, &state);
-            let current_seqno = state.server_seqno.load(Ordering::Relaxed);
-            for msg in &replay_msgs {
-                let wire = WireMessage { server_seqno: current_seqno, message: msg };
-                if let Ok(json) = serde_json::to_string(&wire) {
-                    if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
-                        state.connected_clients.fetch_sub(1, Ordering::Relaxed);
-                        send_task.abort();
-                        return;
-                    }
-                }
+        if entries.is_empty() {
+            // Cursor too old or buffer empty → snapshot fallback
+            send_control!(ServerMessage::Resume(ResumeMode { mode: "snapshot".into() }));
+            if !send_snapshot(&client_tx, &state, &channel, client_id, &mut drop_count, &mut total_sent) {
+                state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+                send_task.abort();
+                return;
             }
-            last_sent_seqno = current_seqno;
-            if !replay_msgs.is_empty() {
-                info!("client-{} snapshot replay (cursor too old): sent {} messages", client_id, replay_msgs.len());
-            }
+            last_sent_seqno = state.server_seqno.load(Ordering::Relaxed);
         } else {
-            // Replay buffered items, applying subscription filter
-            let mut replay_count: usize = 0;
-            let mut events_buf: Vec<SerializableEventData> = Vec::new();
-            let mut messages_buf: Vec<(u64, ServerMessage)> = Vec::new();
-
-            for si in &items {
-                process_item_with_seqno(
-                    si.seqno, &si.item, &subscription, &state.base_filter, &state,
-                    &mut events_buf, &mut messages_buf,
-                );
-                last_sent_seqno = si.seqno;
-            }
-
-            // Flush replay buffers
-            if !events_buf.is_empty() {
-                let msg = ServerMessage::Events(std::mem::take(&mut events_buf));
-                let wire = WireMessage { server_seqno: last_sent_seqno, message: &msg };
-                if let Ok(json) = serde_json::to_string(&wire) {
-                    replay_count += 1;
-                    if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
-                        state.connected_clients.fetch_sub(1, Ordering::Relaxed);
-                        send_task.abort();
-                        return;
-                    }
+            // Cursor hit → send Resume control, then replay stored JSON verbatim
+            send_control!(ServerMessage::Resume(ResumeMode { mode: "resume".into() }));
+            let replay_count = entries.len();
+            for entry in &entries {
+                if !send_or_drop(&client_tx, entry.json.clone(), client_id, &mut drop_count, &mut total_sent) {
+                    state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+                    send_task.abort();
+                    return;
                 }
-            }
-            for (seqno, msg) in std::mem::take(&mut messages_buf) {
-                let wire = WireMessage { server_seqno: seqno, message: &msg };
-                if let Ok(json) = serde_json::to_string(&wire) {
-                    replay_count += 1;
-                    if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
-                        state.connected_clients.fetch_sub(1, Ordering::Relaxed);
-                        send_task.abort();
-                        return;
-                    }
-                }
+                last_sent_seqno = entry.seqno;
             }
             info!(
-                "client-{} cursor resume: replayed {} items from seqno {} (sent {} wire messages)",
-                client_id,
-                items.len(),
-                cursor,
-                replay_count
+                "client-{} cursor resume: replayed {} entries from seqno {}",
+                client_id, replay_count, cursor
             );
         }
     } else {
-        // No cursor — send snapshot replay (existing behaviour)
-        let replay_msgs = build_replay(&channel, &state);
-        let current_seqno = state.server_seqno.load(Ordering::Relaxed);
-        if !replay_msgs.is_empty() {
-            for msg in &replay_msgs {
-                let wire = WireMessage { server_seqno: current_seqno, message: msg };
-                if let Ok(json) = serde_json::to_string(&wire) {
-                    if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
-                        state.connected_clients.fetch_sub(1, Ordering::Relaxed);
-                        send_task.abort();
-                        return;
-                    }
-                }
-            }
-            last_sent_seqno = current_seqno;
-            info!("client-{} snapshot replay: sent {} messages", client_id, replay_msgs.len());
+        // Fresh connect — snapshot replay
+        send_control!(ServerMessage::Resume(ResumeMode { mode: "snapshot".into() }));
+        if !send_snapshot(&client_tx, &state, &channel, client_id, &mut drop_count, &mut total_sent) {
+            state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+            send_task.abort();
+            return;
         }
+        last_sent_seqno = state.server_seqno.load(Ordering::Relaxed);
     }
 
     // ── Live event loop ──
@@ -731,6 +727,9 @@ async fn rest_contention(State(state): State<Arc<GatewayState>>) -> impl IntoRes
 async fn rest_status(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let last = state.last_event_time.load(Ordering::Relaxed);
+    let newest_seqno = state.server_seqno.load(Ordering::Relaxed);
+    let oldest_seqno = state.event_history.lock().unwrap()
+        .front().map(|e| e.seqno).unwrap_or(0);
 
     Json(serde_json::json!({
         "status": if now.saturating_sub(last) <= 10 || last == 0 { "healthy" } else { "degraded" },
@@ -738,7 +737,9 @@ async fn rest_status(State(state): State<Arc<GatewayState>>) -> impl IntoRespons
         "connected_clients": state.connected_clients.load(Ordering::Relaxed),
         "uptime_secs": state.start_time.elapsed().as_secs(),
         "last_event_age_secs": now.saturating_sub(last),
-        "server_seqno": state.server_seqno.load(Ordering::Relaxed),
+        "server_seqno": newest_seqno,
+        "oldest_seqno": oldest_seqno,
+        "newest_seqno": newest_seqno,
     }))
 }
 
@@ -770,6 +771,33 @@ async fn rest_block_lifecycle(
         Some(summary) => Json(serde_json::to_value(&summary).unwrap()).into_response(),
         None => Json(serde_json::json!({ "error": "block not found" })).into_response(),
     }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Replay Serialization
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Pre-serialize a broadcast item into a wire-ready JSON string.
+/// Called once in the forwarder; the resulting string is stored in the
+/// ring buffer and replayed byte-for-byte on cursor resume.
+fn serialize_for_replay(seqno: u64, item: &EventDataOrMetrics, state: &GatewayState) -> String {
+    let msg = match item {
+        EventDataOrMetrics::Event(event_data) => {
+            let mut serializable = SerializableEventData::from(event_data);
+            if let Some(block_number) = event_data.block_number {
+                if let Ok(lc) = state.lifecycle_tracker.read() {
+                    serializable.commit_stage = lc.current_stage_by_number(block_number);
+                }
+            }
+            ServerMessage::Events(vec![serializable])
+        }
+        EventDataOrMetrics::TPS(tps) => ServerMessage::TPS(*tps),
+        EventDataOrMetrics::Contention(data) => ServerMessage::ContentionData(data.clone()),
+        EventDataOrMetrics::TopAccesses(data) => ServerMessage::TopAccesses(data.clone()),
+        EventDataOrMetrics::Lifecycle(update) => ServerMessage::Lifecycle(update.clone()),
+    };
+    let wire = WireMessage { server_seqno: seqno, message: &msg };
+    serde_json::to_string(&wire).unwrap_or_default()
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -933,17 +961,20 @@ async fn run_event_forwarder(
                 }
 
                 // ── Broadcast: event first, then metrics ──
-                // Helper closure: assign seqno, store in history, broadcast
+                // Helper closure: assign seqno, pre-serialize for ring buffer, broadcast
                 let mut broadcast_item = |item: EventDataOrMetrics, state: &Arc<GatewayState>, tx: &broadcast::Sender<SequencedItem>| {
                     let seqno = state.server_seqno.fetch_add(1, Ordering::Relaxed) + 1;
-                    let si = SequencedItem { seqno, item };
+                    // Pre-serialize once for the ring buffer (zero-cost replay)
+                    let json = serialize_for_replay(seqno, &item, state);
                     {
                         let mut history = state.event_history.lock().unwrap();
-                        history.push_back(si.clone());
+                        history.push_back(ReplayEntry { seqno, json });
                         while history.len() > MAX_EVENT_HISTORY {
                             history.pop_front();
                         }
                     }
+                    // Broadcast raw item for live clients (per-subscription filtering)
+                    let si = SequencedItem { seqno, item };
                     let _ = tx.send(si);
                 };
 

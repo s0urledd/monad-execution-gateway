@@ -336,6 +336,15 @@ export interface ContentionData {
 // ─── Server Messages ────────────────────────────────────────────────
 
 /**
+ * Resume control message sent as the first frame after connect/reconnect.
+ * `mode` is `"resume"` when the cursor was valid (buffered replay) or
+ * `"snapshot"` when the cursor was too old or on fresh connect.
+ */
+export interface ResumeMode {
+  mode: "resume" | "snapshot";
+}
+
+/**
  * Every message from the server carries a `server_seqno` — a monotonic
  * counter that uniquely identifies each wire message.  On reconnect the
  * client can pass `?resume_from=<server_seqno>` to pick up exactly
@@ -349,6 +358,7 @@ export type ServerMessage = {
   | { TPS: number }
   | { ContentionData: ContentionData }
   | { Lifecycle: BlockLifecycleUpdate }
+  | { Resume: ResumeMode }
 );
 
 // ─── Channels ───────────────────────────────────────────────────────
@@ -434,6 +444,10 @@ export interface StatusResponse {
   last_event_age_secs: number;
   /** Current server-level sequence number (for cursor resume) */
   server_seqno: number;
+  /** Oldest seqno still in the ring buffer (0 = buffer empty) */
+  oldest_seqno: number;
+  /** Newest seqno assigned so far (same as server_seqno) */
+  newest_seqno: number;
 }
 
 export interface LifecycleResponse extends Array<BlockLifecycleSummary> {}
@@ -462,6 +476,8 @@ export interface GatewayClientEvents {
   contention: (data: ContentionData) => void;
   topAccesses: (data: TopAccessesData) => void;
   lifecycle: (update: BlockLifecycleUpdate) => void;
+  /** Emitted as the first frame after connect/reconnect with the resume mode */
+  resume: (info: ResumeMode) => void;
   connected: () => void;
   disconnected: () => void;
   error: (error: Error) => void;

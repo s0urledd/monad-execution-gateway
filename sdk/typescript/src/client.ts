@@ -10,6 +10,7 @@ import type {
   BlockLifecycleUpdate,
   BlockLifecycleSummary,
   BlockStage,
+  ResumeMode,
   Channel,
   SimpleSubscribe,
   AdvancedSubscribe,
@@ -353,7 +354,9 @@ export class GatewayClient {
       this.lastServerSeqno = msg.server_seqno;
     }
 
-    if ("Events" in msg) {
+    if ("Resume" in msg) {
+      this.emit("resume", msg.Resume);
+    } else if ("Events" in msg) {
       this.emit("events", msg.Events);
       for (const event of msg.Events) {
         this.emit("event", event);
