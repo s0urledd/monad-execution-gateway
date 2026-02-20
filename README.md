@@ -181,7 +181,6 @@ monad-execution-gateway/
 - **Bot builders** — Storage access patterns for transaction ordering optimization
 - **Game studios** — State partition analysis for parallel execution optimization
 - **Analytics platforms** — Execution-level metrics unavailable from RPC
-- **Validator operators** — Node health monitoring and performance metrics
 
 ## License
 
