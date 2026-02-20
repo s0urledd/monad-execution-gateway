@@ -44,7 +44,7 @@ See [Deployment Guide](docs/DEPLOYMENT.md) for detailed setup instructions.
 # All events
 websocat ws://your-validator:8443/v1/ws
 
-# Block lifecycle only (Proposed → Voted → Finalized → Verified)
+# Block lifecycle only (Proposed -> Voted -> Finalized -> Verified)
 websocat ws://your-validator:8443/v1/ws/lifecycle
 
 # Blocks + TPS
@@ -56,13 +56,19 @@ curl http://your-validator:8443/v1/status
 curl http://your-validator:8443/v1/blocks/lifecycle
 ```
 
+### TypeScript SDK
+
 ```typescript
-// TypeScript SDK
 import { GatewayClient } from "@monad-labs/execution-events";
 
 const client = new GatewayClient({
   url: "ws://your-validator:8443",
   channel: "lifecycle",   // "all" | "blocks" | "txs" | "contention" | "lifecycle"
+});
+
+// First frame tells you the resume mode
+client.on("resume", (info) => {
+  console.log(`Connected in ${info.mode} mode`);   // "resume" or "snapshot"
 });
 
 // Watch blocks progress through consensus stages
@@ -100,67 +106,102 @@ All endpoints served on a single port (default `8443`):
 | `/v1/ws/blocks` | WebSocket | Block lifecycle events + TPS |
 | `/v1/ws/txs` | WebSocket | Transaction events only |
 | `/v1/ws/contention` | WebSocket | Contention data only |
-| `/v1/ws/lifecycle` | WebSocket | Block stage transitions only (Proposed/Voted/Finalized/Verified) |
+| `/v1/ws/lifecycle` | WebSocket | Block stage transitions only |
 | `/v1/tps` | REST | Current TPS snapshot |
 | `/v1/contention` | REST | Latest per-block contention data |
 | `/v1/blocks/lifecycle` | REST | Lifecycle summaries for recent blocks |
 | `/v1/blocks/:number/lifecycle` | REST | Full lifecycle for a specific block |
-| `/v1/status` | REST | Gateway status |
+| `/v1/status` | REST | Gateway status + cursor resume window |
 | `/health` | REST | Health check |
+
+All WebSocket endpoints accept `?resume_from=<server_seqno>` for cursor-based reconnect (see below).
+
+## Cursor Resume
+
+Every wire message carries a `server_seqno` — a monotonic sequence number. On reconnect, the client passes `?resume_from=<last_seen_seqno>` and the server replays only the missed messages from an in-memory ring buffer (100K entries). No duplicate data, no full re-replay.
+
+```
+First connect:          ws://host:8443/v1/ws
+                        <- {"server_seqno":0, "Resume":{"mode":"snapshot"}}
+                        <- {"server_seqno":1, "TPS":2450}
+                        <- {"server_seqno":5, "Events":[...]}
+                        ...client disconnects at seqno 42...
+
+Reconnect:              ws://host:8443/v1/ws?resume_from=42
+                        <- {"server_seqno":42, "Resume":{"mode":"resume"}}
+                        <- {"server_seqno":43, ...}   // picks up right where you left off
+```
+
+If the cursor is too old (evicted from the buffer), the server falls back to a snapshot replay and sends `{"mode":"snapshot"}`.
+
+The SDK handles this automatically — `lastServerSeqno` is tracked internally and `?resume_from` is appended on every reconnect.
+
+Check the replay window via REST:
+
+```bash
+curl http://your-validator:8443/v1/status
+# {"server_seqno":54321, "oldest_seqno":4321, "newest_seqno":54321, ...}
+```
+
+## Backpressure
+
+Each WebSocket client gets a bounded send buffer (4096 messages). If a client falls behind:
+
+1. Messages are dropped (not queued indefinitely)
+2. Warning logged every 1000 drops
+3. Client disconnected after 10,000 drops
+
+This prevents a single slow consumer from exhausting server memory.
 
 ## Architecture
 
 ```
 Monad Validator Node
-        │
-        ▼
-┌─────────────────────┐
-│  Event Ring (mmap)   │  Hugepage-backed ring buffer
-│  Zero-copy read      │  Nanosecond-precision timestamps
-└────────┬────────────┘
-         │ blocking thread
-         ▼
-┌─────────────────────┐
-│  Event Listener      │  Reads ring, converts C structs → Rust
-└────────┬────────────┘
-         │ mpsc channel (100K buffer)
-         ▼
-┌─────────────────────┐
-│  Event Forwarder     │  Lifecycle tracker + TPS + contention + top-K
-│  ├─ BlockLifecycle   │  Tracks Proposed→Voted→Finalized→Verified
-│  └─ commit_stage     │  Attaches finality info to every event
-└────────┬────────────┘
-         │ broadcast channel (1M buffer)
-         ▼
-┌─────────────────────┐
-│  axum Server :8443   │
-│  ├─ /v1/ws/*         │  5 WebSocket channels + subscriptions
-│  ├─ /v1/ws/lifecycle │  Block stage transitions
-│  ├─ /v1/blocks/*     │  Lifecycle REST queries
-│  ├─ /v1/tps          │  REST snapshots
-│  └─ /health          │  Health check
-└─────────────────────┘
+        |
+        v
++---------------------+
+|  Event Ring (mmap)   |  Hugepage-backed ring buffer
+|  Zero-copy read      |  Nanosecond-precision timestamps
++--------+------------+
+         | blocking thread
+         v
++---------------------+
+|  Event Listener      |  Reads ring, converts C structs -> Rust
++--------+------------+
+         | mpsc channel (100K buffer)
+         v
++---------------------+
+|  Event Forwarder     |  Lifecycle tracker + TPS + contention + top-K
+|  +- server_seqno     |  Assigns monotonic seqno to every item
+|  +- ring buffer      |  Pre-serializes & stores for cursor resume
+|  +- commit_stage     |  Attaches finality info to every event
++--------+------------+
+         | broadcast channel (1M buffer)
+         v
++---------------------+
+|  axum Server :8443   |
+|  +- /v1/ws/*         |  5 WebSocket channels + subscriptions
+|  +- backpressure     |  Per-client bounded buffer (4096)
+|  +- cursor resume    |  ?resume_from=<seqno> on reconnect
+|  +- /v1/blocks/*     |  Lifecycle REST queries
+|  +- /v1/tps          |  REST snapshots
+|  +- /health          |  Health check
++---------------------+
 ```
 
 ## Computed Metrics
 
-The gateway computes real-time analytics on the server side:
+**Block Lifecycle** — Tracks each block through MonadBFT consensus stages: Proposed -> Voted (~400ms, speculative finality) -> Finalized (~800ms, full finality) -> Verified (state root confirmed). Every event carries its block's `commit_stage` so clients know finality confidence.
 
-**Block Lifecycle** — Tracks each block through MonadBFT consensus stages: Proposed → Voted (~400ms, speculative finality) → Finalized (~800ms, full finality) → Verified (state root confirmed). Every event carries its block's `commit_stage` so clients know finality confidence.
+**TPS** — 2.5-block rolling window transaction count (~1 second at Monad's ~400ms block time).
 
-**TPS** — 2.5-block rolling window transaction count (~1 second at Monad's ~400ms block time)
+**Contention Data** — Per-block analysis: parallel execution efficiency, contended storage slots, top contended contracts, contract co-access graph.
 
-**Contention Data** — Per-block analysis:
-- Parallel execution efficiency (% of time saved by parallel execution)
-- Contended storage slots (accessed by 2+ transactions)
-- Top contended contracts ranked by contention score
-- Contract co-access graph (which contracts share transactions)
-
-**Top Accesses** — Space-Saving algorithm tracking most frequently accessed accounts and storage slots (reset every 5 minutes)
+**Top Accesses** — Space-Saving algorithm tracking most frequently accessed accounts and storage slots (reset every 5 minutes).
 
 ## Documentation
 
-- [API Reference](docs/API.md) — Endpoints, subscription protocol, message formats
+- [API Reference](docs/API.md) — Endpoints, wire format, subscription protocol, cursor resume
 - [Execution Events Reference](docs/EVENTS.md) — All 25 event types with field descriptions
 - [Deployment Guide](docs/DEPLOYMENT.md) — Docker, native build, systemd, firewall
 
@@ -178,29 +219,26 @@ The gateway computes real-time analytics on the server side:
 
 ```
 monad-execution-gateway/
-├── gateway/                 # Rust WebSocket + REST gateway server
-│   ├── src/
-│   │   ├── bin/gateway.rs   # Entry point
-│   │   └── lib/             # Event listener, server, filters, analytics
-│   ├── Dockerfile
-│   ├── build.sh             # Native build helper
-│   └── restricted_filters.json
-├── sdk/typescript/          # TypeScript client SDK
-│   └── src/
-│       ├── client.ts        # GatewayClient class
-│       └── types.ts         # Full type definitions
-├── docs/                    # API and deployment documentation
-├── examples/                # Usage examples
-└── docker-compose.yml
++-- gateway/                 # Rust WebSocket + REST gateway server
+|   +-- src/
+|   |   +-- bin/gateway.rs   # Entry point
+|   |   +-- lib/             # Event listener, server, filters, analytics
+|   +-- Dockerfile
+|   +-- build.sh             # Native build helper
+|   +-- restricted_filters.json
++-- sdk/typescript/          # TypeScript client SDK
+|   +-- src/
+|       +-- client.ts        # GatewayClient class (auto cursor resume)
+|       +-- types.ts         # Full type definitions
++-- docs/                    # API and deployment documentation
++-- examples/                # Usage examples
++-- docker-compose.yml
 ```
 
-## Who Uses This
+## Contributing
 
-- **Trading teams** — Real-time TPS and contention signals for market stress detection
-- **Bot builders** — Storage access patterns for transaction ordering optimization
-- **Game studios** — State partition analysis for parallel execution optimization
-- **Analytics platforms** — Execution-level metrics unavailable from RPC
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

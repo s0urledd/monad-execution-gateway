@@ -2,9 +2,15 @@
 
 Monad's execution engine emits structured events from the EVM in real-time via a memory-mapped ring buffer. These events provide **execution-level visibility** that is not available through standard Ethereum JSON-RPC.
 
+> **Wire format:** Events are delivered inside an `Events` batch on the WebSocket. Every wire message carries a `server_seqno` for [cursor resume](API.md#cursor-resume):
+> ```json
+> {"server_seqno": 42, "Events": [{ ... }, { ... }]}
+> ```
+> See the [API Reference](API.md) for the full wire format.
+
 ## Event Envelope
 
-Every event is wrapped in an envelope with metadata:
+Each event inside the `Events` array has the following fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
