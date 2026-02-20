@@ -7,7 +7,7 @@
  *   npx ts-node examples/subscribe-blocks.ts ws://your-validator:8443
  */
 
-import { GatewayClient } from "../sdk/typescript/src";
+import { GatewayClient } from "../sdk/typescript/src/index";
 
 const url = process.argv[2] || "ws://127.0.0.1:8443";
 const client = new GatewayClient({ url, channel: "blocks" });
