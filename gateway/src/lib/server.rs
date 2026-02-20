@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{Address, B256};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -17,6 +17,7 @@ use tokio::sync::{broadcast, watch};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info, warn};
 
+use crate::block_lifecycle::{BlockLifecycleTracker, BlockLifecycleUpdate, BlockStage};
 use crate::contention_tracker::{ContentionData, ContentionTracker};
 use crate::event_filter::{is_restricted_mode, load_restricted_filters, EventFilter, EventFilterSpec};
 use crate::event_listener::{EventData, EventName};
@@ -39,6 +40,7 @@ pub enum EventDataOrMetrics {
     TopAccesses(TopAccessesData),
     TPS(usize),
     Contention(ContentionData),
+    Lifecycle(BlockLifecycleUpdate),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +49,7 @@ pub enum ServerMessage {
     TopAccesses(TopAccessesData),
     TPS(usize),
     ContentionData(ContentionData),
+    Lifecycle(BlockLifecycleUpdate),
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -62,6 +65,7 @@ pub struct GatewayState {
     pub start_time: Instant,
     pub last_event_time: AtomicU64,
     pub base_filter: EventFilter,
+    pub lifecycle_tracker: RwLock<BlockLifecycleTracker>,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -74,6 +78,7 @@ enum Channel {
     Blocks,
     Transactions,
     Contention,
+    Lifecycle,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +87,10 @@ struct ClientSubscription {
     include_tps: bool,
     include_contention: bool,
     include_top_accesses: bool,
+    include_lifecycle: bool,
+    /// Only deliver events from blocks that have reached this stage.
+    /// `None` means deliver immediately (no stage gating).
+    min_stage: Option<BlockStage>,
     field_filter: Option<EventFilter>,
 }
 
@@ -92,6 +101,8 @@ impl ClientSubscription {
             include_tps: true,
             include_contention: true,
             include_top_accesses: true,
+            include_lifecycle: true,
+            min_stage: None,
             field_filter: None,
         }
     }
@@ -113,6 +124,8 @@ impl ClientSubscription {
                 include_tps: true,
                 include_contention: false,
                 include_top_accesses: false,
+                include_lifecycle: true,
+                min_stage: None,
                 field_filter: None,
             },
             Channel::Transactions => Self {
@@ -130,6 +143,8 @@ impl ClientSubscription {
                 include_tps: false,
                 include_contention: false,
                 include_top_accesses: false,
+                include_lifecycle: false,
+                min_stage: None,
                 field_filter: None,
             },
             Channel::Contention => Self {
@@ -137,6 +152,17 @@ impl ClientSubscription {
                 include_tps: false,
                 include_contention: true,
                 include_top_accesses: false,
+                include_lifecycle: false,
+                min_stage: None,
+                field_filter: None,
+            },
+            Channel::Lifecycle => Self {
+                event_names: HashSet::new(),
+                include_tps: false,
+                include_contention: false,
+                include_top_accesses: false,
+                include_lifecycle: true,
+                min_stage: None,
                 field_filter: None,
             },
         }
@@ -145,6 +171,16 @@ impl ClientSubscription {
     fn wants_event(&self, event: &SerializableEventData, base_filter: &EventFilter) -> bool {
         if !base_filter.matches_event(event) {
             return false;
+        }
+        // Stage-aware filtering: skip events whose block hasn't reached min_stage
+        if let Some(min_stage) = self.min_stage {
+            match event.commit_stage {
+                Some(stage) if stage >= min_stage => {}
+                Some(_) => return false,
+                // If commit_stage is unknown, let it through (block-level events
+                // without a tracked block shouldn't be silently dropped)
+                None => {}
+            }
         }
         if self.event_names.is_empty() {
             return true;
@@ -175,14 +211,18 @@ struct AdvancedSubscribeInner {
     events: Vec<String>,
     #[serde(default)]
     filters: Vec<EventFilterSpec>,
+    /// Only deliver events from blocks that have reached this commit stage.
+    /// E.g. `"min_stage": "Finalized"` — only finalized block events.
+    #[serde(default)]
+    min_stage: Option<BlockStage>,
 }
 
 fn parse_subscribe(text: &str) -> Option<ClientSubscription> {
     let msg: SubscribeMessage = serde_json::from_str(text).ok()?;
 
-    let (items, filters) = match msg {
-        SubscribeMessage::Simple { subscribe } => (subscribe, vec![]),
-        SubscribeMessage::Advanced { subscribe } => (subscribe.events, subscribe.filters),
+    let (items, filters, min_stage) = match msg {
+        SubscribeMessage::Simple { subscribe } => (subscribe, vec![], None),
+        SubscribeMessage::Advanced { subscribe } => (subscribe.events, subscribe.filters, subscribe.min_stage),
     };
 
     let mut event_names = HashSet::new();
@@ -190,11 +230,14 @@ fn parse_subscribe(text: &str) -> Option<ClientSubscription> {
     let mut include_contention = false;
     let mut include_top_accesses = false;
 
+    let mut include_lifecycle = false;
+
     for item in &items {
         match item.as_str() {
             "TPS" => include_tps = true,
             "ContentionData" => include_contention = true,
             "TopAccesses" => include_top_accesses = true,
+            "Lifecycle" => include_lifecycle = true,
             name => {
                 // Try PascalCase serde deserialization
                 if let Ok(event_name) = serde_json::from_str::<EventName>(&format!("\"{}\"", name)) {
@@ -209,6 +252,8 @@ fn parse_subscribe(text: &str) -> Option<ClientSubscription> {
         include_tps,
         include_contention,
         include_top_accesses,
+        include_lifecycle,
+        min_stage,
         field_filter: if filters.is_empty() {
             None
         } else {
@@ -267,6 +312,10 @@ async fn ws_contention_handler(ws: WebSocketUpgrade, State(state): State<Arc<Gat
     ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Contention))
 }
 
+async fn ws_lifecycle(ws: WebSocketUpgrade, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Lifecycle))
+}
+
 async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel) {
     let client_id = state.connected_clients.fetch_add(1, Ordering::Relaxed);
     info!("WebSocket connected: client-{} (channel: {:?})", client_id, channel);
@@ -283,11 +332,11 @@ async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel
             event = rx.recv() => {
                 match event {
                     Ok(item) => {
-                        process_item(&item, &subscription, &state.base_filter, &mut events_buf, &mut messages_buf);
+                        process_item(&item, &subscription, &state.base_filter, &state, &mut events_buf, &mut messages_buf);
 
                         // Drain available events without blocking
                         while let Ok(item) = rx.try_recv() {
-                            process_item(&item, &subscription, &state.base_filter, &mut events_buf, &mut messages_buf);
+                            process_item(&item, &subscription, &state.base_filter, &state, &mut events_buf, &mut messages_buf);
                         }
 
                         // Send batched events
@@ -339,12 +388,19 @@ fn process_item(
     item: &EventDataOrMetrics,
     subscription: &ClientSubscription,
     base_filter: &EventFilter,
+    state: &GatewayState,
     events_buf: &mut Vec<SerializableEventData>,
     messages_buf: &mut Vec<ServerMessage>,
 ) {
     match item {
         EventDataOrMetrics::Event(event_data) => {
-            let serializable = SerializableEventData::from(event_data);
+            let mut serializable = SerializableEventData::from(event_data);
+            // Attach commit_stage from lifecycle tracker
+            if let Some(block_number) = event_data.block_number {
+                if let Ok(lc) = state.lifecycle_tracker.read() {
+                    serializable.commit_stage = lc.current_stage_by_number(block_number);
+                }
+            }
             if subscription.wants_event(&serializable, base_filter) {
                 events_buf.push(serializable);
             }
@@ -362,6 +418,11 @@ fn process_item(
         EventDataOrMetrics::TopAccesses(data) => {
             if subscription.include_top_accesses {
                 messages_buf.push(ServerMessage::TopAccesses(data.clone()));
+            }
+        }
+        EventDataOrMetrics::Lifecycle(update) => {
+            if subscription.include_lifecycle {
+                messages_buf.push(ServerMessage::Lifecycle(update.clone()));
             }
         }
     }
@@ -408,6 +469,23 @@ async fn rest_health(State(state): State<Arc<GatewayState>>) -> impl IntoRespons
     Json(serde_json::json!({ "success": age <= 10 || last == 0 }))
 }
 
+async fn rest_lifecycle(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+    let lc = state.lifecycle_tracker.read().unwrap();
+    let summaries = lc.get_all_lifecycles();
+    Json(serde_json::to_value(&summaries).unwrap())
+}
+
+async fn rest_block_lifecycle(
+    State(state): State<Arc<GatewayState>>,
+    Path(block_number): Path<u64>,
+) -> impl IntoResponse {
+    let lc = state.lifecycle_tracker.read().unwrap();
+    match lc.get_lifecycle_by_number(block_number) {
+        Some(summary) => Json(serde_json::to_value(&summary).unwrap()).into_response(),
+        None => Json(serde_json::json!({ "error": "block not found" })).into_response(),
+    }
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Event Forwarder
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -426,6 +504,7 @@ async fn run_event_forwarder(
     let mut current_txn_hashes: Vec<Option<[u8; 32]>> = vec![None; 10_000];
     let mut tps_tracker = TPSTracker::new();
     let mut contention_tracker = ContentionTracker::new();
+    let mut current_block_number: u64 = 0;
 
     loop {
         tokio::select! {
@@ -455,21 +534,94 @@ async fn run_event_forwarder(
 
                 let mut tps_event = None;
                 let mut contention_event = None;
+                let mut lifecycle_event = None;
 
+                // ── Lifecycle tracker: update BEFORE broadcasting ──
+                // This ensures any consumer sees the correct commit stage.
                 match event_data.event_name {
                     EventName::BlockStart => {
-                        let tps = tps_tracker.get_tps();
-                        let _ = tps_tx.send(tps);
-                        tps_event = Some(EventDataOrMetrics::TPS(tps));
                         if let ExecEvent::BlockStart(block) = &event_data.payload {
-                            state.block_number.store(block.block_tag.block_number, Ordering::Relaxed);
-                            contention_tracker.on_block_start(block.block_tag.block_number, event_data.timestamp_ns);
+                            let block_id = B256::from_slice(&block.block_tag.id.bytes);
+                            let block_number = block.block_tag.block_number;
+                            current_block_number = block_number;
+
+                            let mut lc = state.lifecycle_tracker.write().unwrap();
+                            let update = lc.on_block_proposed(block_id, block_number, event_data.timestamp_ns);
+                            lifecycle_event = Some(EventDataOrMetrics::Lifecycle(update));
+
+                            state.block_number.store(block_number, Ordering::Relaxed);
+                            contention_tracker.on_block_start(block_number, event_data.timestamp_ns);
+
+                            let tps = tps_tracker.get_tps();
+                            let _ = tps_tx.send(tps);
+                            tps_event = Some(EventDataOrMetrics::TPS(tps));
+                        }
+                    }
+                    EventName::BlockEnd => {
+                        if let ExecEvent::BlockEnd(end) = &event_data.payload {
+                            let eth_hash = B256::from_slice(&end.eth_block_hash.bytes);
+                            let gas_used = end.exec_output.gas_used;
+
+                            // Internal signal: updates metadata, does NOT advance public stage
+                            let mut lc = state.lifecycle_tracker.write().unwrap();
+                            lc.on_execution_end(current_block_number, event_data.timestamp_ns, gas_used, eth_hash);
+                        }
+
+                        if let Some(data) = contention_tracker.on_block_end(event_data.timestamp_ns) {
+                            let _ = contention_tx.send(Some(data.clone()));
+                            contention_event = Some(EventDataOrMetrics::Contention(data));
+                        }
+                    }
+                    EventName::BlockQC => {
+                        // QC → Voted (public stage transition)
+                        if let ExecEvent::BlockQC(qc) = &event_data.payload {
+                            let block_id = B256::from_slice(&qc.block_tag.id.bytes);
+                            let block_number = qc.block_tag.block_number;
+
+                            let mut lc = state.lifecycle_tracker.write().unwrap();
+                            if let Some(update) = lc.advance_stage(block_id, block_number, BlockStage::Voted, event_data.timestamp_ns) {
+                                lifecycle_event = Some(EventDataOrMetrics::Lifecycle(update));
+                            }
+                        }
+                    }
+                    EventName::BlockFinalized => {
+                        if let ExecEvent::BlockFinalized(fin) = &event_data.payload {
+                            let block_id = B256::from_slice(&fin.id.bytes);
+                            let block_number = fin.block_number;
+
+                            let mut lc = state.lifecycle_tracker.write().unwrap();
+                            if let Some(update) = lc.advance_stage(block_id, block_number, BlockStage::Finalized, event_data.timestamp_ns) {
+                                lifecycle_event = Some(EventDataOrMetrics::Lifecycle(update));
+                            }
+                        }
+                    }
+                    EventName::BlockVerified => {
+                        if let ExecEvent::BlockVerified(ver) = &event_data.payload {
+                            let block_number = ver.block_number;
+
+                            let mut lc = state.lifecycle_tracker.write().unwrap();
+                            // BlockVerified only has block_number — advance_stage falls back to number lookup
+                            if let Some(update) = lc.advance_stage(B256::ZERO, block_number, BlockStage::Verified, event_data.timestamp_ns) {
+                                lifecycle_event = Some(EventDataOrMetrics::Lifecycle(update));
+                            }
+                        }
+                    }
+                    EventName::BlockReject => {
+                        // Rejected can happen from any stage
+                        let mut lc = state.lifecycle_tracker.write().unwrap();
+                        if let Some(update) = lc.advance_stage(B256::ZERO, current_block_number, BlockStage::Rejected, event_data.timestamp_ns) {
+                            lifecycle_event = Some(EventDataOrMetrics::Lifecycle(update));
                         }
                     }
                     EventName::TxnHeaderStart => {
                         tps_tracker.record_tx();
                         if let Some(txn_idx) = event_data.txn_idx {
                             contention_tracker.on_txn_start(txn_idx, event_data.timestamp_ns);
+                        }
+                        // Track transaction count in lifecycle
+                        {
+                            let mut lc = state.lifecycle_tracker.write().unwrap();
+                            lc.record_txn(current_block_number);
                         }
                     }
                     EventName::TxnEnd => {
@@ -494,16 +646,8 @@ async fn run_event_forwarder(
                     _ => (),
                 }
 
-                let send_accesses = if let EventName::BlockEnd = event_data.event_name {
-                    if let Some(data) = contention_tracker.on_block_end(event_data.timestamp_ns) {
-                        let _ = contention_tx.send(Some(data.clone()));
-                        contention_event = Some(EventDataOrMetrics::Contention(data));
-                    }
-                    true
-                } else {
-                    false
-                };
-
+                // ── Broadcast: event first, then metrics ──
+                let send_accesses = event_data.event_name == EventName::BlockEnd;
                 let _ = event_broadcast.send(EventDataOrMetrics::Event(event_data));
 
                 if send_accesses {
@@ -514,6 +658,7 @@ async fn run_event_forwarder(
                 }
                 if let Some(e) = tps_event { let _ = event_broadcast.send(e); }
                 if let Some(e) = contention_event { let _ = event_broadcast.send(e); }
+                if let Some(e) = lifecycle_event { let _ = event_broadcast.send(e); }
             }
             _ = accesses_reset_interval.tick() => {
                 account_accesses.reset();
@@ -552,6 +697,7 @@ pub async fn run_server(
         start_time: Instant::now(),
         last_event_time: AtomicU64::new(0),
         base_filter,
+        lifecycle_tracker: RwLock::new(BlockLifecycleTracker::new()),
     });
 
     tokio::spawn(run_event_forwarder(
@@ -573,10 +719,13 @@ pub async fn run_server(
         .route("/v1/ws/blocks", get(ws_blocks))
         .route("/v1/ws/txs", get(ws_txs))
         .route("/v1/ws/contention", get(ws_contention_handler))
+        .route("/v1/ws/lifecycle", get(ws_lifecycle))
         // REST
         .route("/v1/tps", get(rest_tps))
         .route("/v1/contention", get(rest_contention))
         .route("/v1/status", get(rest_status))
+        .route("/v1/blocks/lifecycle", get(rest_lifecycle))
+        .route("/v1/blocks/:block_number/lifecycle", get(rest_block_lifecycle))
         // Health
         .route("/health", get(rest_health))
         // Backward compat: root path = all events
@@ -589,9 +738,11 @@ pub async fn run_server(
     info!("  Blocks:     ws://{}/v1/ws/blocks", addr);
     info!("  Txs:        ws://{}/v1/ws/txs", addr);
     info!("  Contention: ws://{}/v1/ws/contention", addr);
+    info!("  Lifecycle:  ws://{}/v1/ws/lifecycle", addr);
     info!("  REST:       http://{}/v1/tps", addr);
     info!("              http://{}/v1/contention", addr);
     info!("              http://{}/v1/status", addr);
+    info!("              http://{}/v1/blocks/lifecycle", addr);
     info!("  Health:     http://{}/health", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

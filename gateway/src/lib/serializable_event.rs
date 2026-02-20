@@ -1,3 +1,4 @@
+use super::block_lifecycle::BlockStage;
 use super::event_listener::{EventData, EventName};
 use alloy_primitives::{Address, Bytes, B256, U256};
 use monad_exec_events::{ffi::*, ExecEvent};
@@ -302,7 +303,10 @@ impl From<&ExecEvent> for SerializableExecEvent {
     }
 }
 
-/// Serializable version of EventData with converted payload
+/// Serializable version of EventData with converted payload.
+///
+/// Every event carries its block's current `commit_stage` — the public
+/// consensus stage the block has reached at the time this event was processed.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SerializableEventData {
     pub event_name: EventName,
@@ -312,6 +316,9 @@ pub struct SerializableEventData {
     pub txn_idx: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub txn_hash: Option<B256>,
+    /// Current public commit stage of this event's block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_stage: Option<BlockStage>,
     pub payload: SerializableExecEvent,
     pub seqno: u64,
     pub timestamp_ns: u64,
@@ -324,9 +331,10 @@ impl From<&EventData> for SerializableEventData {
             block_number: data.block_number,
             txn_idx: data.txn_idx,
             txn_hash: data.txn_hash.map(B256::from),
+            commit_stage: None, // Set by server after lifecycle tracker lookup
             payload: SerializableExecEvent::from(&data.payload),
             seqno: data.seqno,
-            timestamp_ns: data.timestamp_ns.clone(),
+            timestamp_ns: data.timestamp_ns,
         }
     }
 }
