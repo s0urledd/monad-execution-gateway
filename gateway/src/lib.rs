@@ -1,3 +1,6 @@
+pub mod block_lifecycle {
+    include!("lib/block_lifecycle.rs");
+}
 pub mod contention_tracker {
     include!("lib/contention_tracker.rs");
 }
