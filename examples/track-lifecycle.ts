@@ -8,7 +8,7 @@
  *   npx ts-node examples/track-lifecycle.ts ws://your-validator:8443
  */
 
-import { GatewayClient, type BlockLifecycleUpdate } from "../sdk/typescript/src";
+import { GatewayClient, type BlockLifecycleUpdate } from "../sdk/typescript/src/index";
 
 const url = process.argv[2] || "ws://127.0.0.1:8443";
 

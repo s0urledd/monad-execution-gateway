@@ -13,7 +13,7 @@
  *   npx ts-node examples/track-storage.ts ws://your-validator:8443 0xYourContract
  */
 
-import { GatewayClient } from "../sdk/typescript/src";
+import { GatewayClient } from "../sdk/typescript/src/index";
 
 const url = process.argv[2] || "ws://127.0.0.1:8443";
 const targetAddress = (process.argv[3] || "").toLowerCase();
