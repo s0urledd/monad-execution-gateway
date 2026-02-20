@@ -23,6 +23,10 @@ export type {
   RecordErrorPayload,
   EvmErrorPayload,
   EmptyPayload,
+  // Block lifecycle
+  BlockStage,
+  BlockLifecycleUpdate,
+  BlockLifecycleSummary,
   // Metrics
   ContentionData,
   ContendedSlotEntry,
