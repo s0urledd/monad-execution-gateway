@@ -1,12 +1,12 @@
-use std::collections::{HashSet, VecDeque};
-use std::net::SocketAddr;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{Address, B256};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -79,6 +79,12 @@ const CLIENT_SEND_BUFFER: usize = 4_096;
 /// After this many dropped messages, disconnect the slow client.
 const SLOW_CLIENT_DROP_LIMIT: u64 = 10_000;
 
+/// Maximum concurrent WebSocket connections from a single IP address.
+const MAX_CONNECTIONS_PER_IP: usize = 10;
+
+/// Maximum number of subscribe-message updates a single client may send.
+const MAX_SUBSCRIBES_PER_CLIENT: usize = 5;
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Sequenced Broadcast Item
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -136,6 +142,35 @@ pub struct GatewayState {
     pub server_seqno: AtomicU64,
     /// Ring buffer of pre-serialized wire messages for zero-cost cursor-resume.
     pub event_history: Mutex<VecDeque<ReplayEntry>>,
+    /// Per-IP active connection counter for rate limiting.
+    ip_connections: Mutex<HashMap<IpAddr, usize>>,
+    /// Shutdown signal for graceful termination.
+    pub shutdown: watch::Receiver<()>,
+}
+
+impl GatewayState {
+    /// Try to acquire a connection slot for this IP.
+    /// Returns `true` if the slot was acquired, `false` if the limit is reached.
+    fn acquire_ip_slot(&self, ip: IpAddr) -> bool {
+        let mut map = self.ip_connections.lock().unwrap();
+        let count = map.entry(ip).or_insert(0);
+        if *count >= MAX_CONNECTIONS_PER_IP {
+            return false;
+        }
+        *count += 1;
+        true
+    }
+
+    /// Release a connection slot for this IP.
+    fn release_ip_slot(&self, ip: IpAddr) {
+        let mut map = self.ip_connections.lock().unwrap();
+        if let Some(count) = map.get_mut(&ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                map.remove(&ip);
+            }
+        }
+    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -372,41 +407,66 @@ impl TPSTracker {
 async fn ws_all(
     ws: WebSocketUpgrade,
     Query(q): Query<WsQuery>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<GatewayState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::All, q.resume_from))
+    try_upgrade(ws, state, Channel::All, q.resume_from, addr.ip())
 }
 
 async fn ws_blocks(
     ws: WebSocketUpgrade,
     Query(q): Query<WsQuery>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<GatewayState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Blocks, q.resume_from))
+    try_upgrade(ws, state, Channel::Blocks, q.resume_from, addr.ip())
 }
 
 async fn ws_txs(
     ws: WebSocketUpgrade,
     Query(q): Query<WsQuery>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<GatewayState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Transactions, q.resume_from))
+    try_upgrade(ws, state, Channel::Transactions, q.resume_from, addr.ip())
 }
 
 async fn ws_contention_handler(
     ws: WebSocketUpgrade,
     Query(q): Query<WsQuery>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<GatewayState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Contention, q.resume_from))
+    try_upgrade(ws, state, Channel::Contention, q.resume_from, addr.ip())
 }
 
 async fn ws_lifecycle(
     ws: WebSocketUpgrade,
     Query(q): Query<WsQuery>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<GatewayState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Lifecycle, q.resume_from))
+    try_upgrade(ws, state, Channel::Lifecycle, q.resume_from, addr.ip())
+}
+
+fn try_upgrade(
+    ws: WebSocketUpgrade,
+    state: Arc<GatewayState>,
+    channel: Channel,
+    resume_from: Option<u64>,
+    ip: IpAddr,
+) -> axum::response::Response {
+    if !state.acquire_ip_slot(ip) {
+        metrics::WS_REJECTED_IP_LIMIT.inc();
+        warn!("Rejected WebSocket from {} (per-IP limit {})", ip, MAX_CONNECTIONS_PER_IP);
+        return (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "Too many connections from this IP",
+        )
+            .into_response();
+    }
+    ws.on_upgrade(move |socket| handle_ws(socket, state, channel, resume_from, ip))
+        .into_response()
 }
 
 /// Build a snapshot of current gateway state to send on WebSocket connect.
@@ -471,12 +531,14 @@ async fn handle_ws(
     state: Arc<GatewayState>,
     channel: Channel,
     resume_from: Option<u64>,
+    ip: IpAddr,
 ) {
     let client_id = state.connected_clients.fetch_add(1, Ordering::Relaxed);
     metrics::WS_ACTIVE_CONNECTIONS.inc();
+    let mut shutdown_rx = state.shutdown.clone();
     info!(
-        "WebSocket connected: client-{} (channel: {:?}, resume_from: {:?})",
-        client_id, channel, resume_from
+        "WebSocket connected: client-{} from {} (channel: {:?}, resume_from: {:?})",
+        client_id, ip, channel, resume_from
     );
 
     let (ws_sender, mut receiver) = socket.split();
@@ -687,6 +749,7 @@ async fn handle_ws(
     // ── Live event loop ──
     let mut events_buf: Vec<SerializableEventData> = Vec::new();
     let mut messages_buf: Vec<(u64, ServerMessage)> = Vec::new();
+    let mut subscribe_count: usize = 0;
 
     loop {
         tokio::select! {
@@ -740,14 +803,25 @@ async fn handle_ws(
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        if subscribe_count >= MAX_SUBSCRIBES_PER_CLIENT {
+                            metrics::WS_REJECTED_SUB_LIMIT.inc();
+                            warn!("client-{}: subscribe limit reached ({}), ignoring", client_id, MAX_SUBSCRIBES_PER_CLIENT);
+                            continue;
+                        }
                         if let Some(new_sub) = parse_subscribe(&text) {
-                            info!("client-{} updated subscription", client_id);
+                            subscribe_count += 1;
+                            info!("client-{} updated subscription ({}/{})", client_id, subscribe_count, MAX_SUBSCRIBES_PER_CLIENT);
                             subscription = new_sub;
                         }
                     }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     _ => {}
                 }
+            }
+
+            _ = shutdown_rx.changed() => {
+                info!("client-{}: shutting down (SIGTERM)", client_id);
+                break;
             }
         }
     }
@@ -756,15 +830,16 @@ async fn handle_ws(
     drop(client_tx);
     let _ = send_task.await;
     state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+    state.release_ip_slot(ip);
     metrics::WS_ACTIVE_CONNECTIONS.dec();
     metrics::WS_DISCONNECT_TOTAL.inc();
     if drop_count > 0 {
         info!(
-            "WebSocket disconnected: client-{} (sent: {}, dropped: {})",
-            client_id, total_sent, drop_count
+            "WebSocket disconnected: client-{} from {} (sent: {}, dropped: {})",
+            client_id, ip, total_sent, drop_count
         );
     } else {
-        info!("WebSocket disconnected: client-{}", client_id);
+        info!("WebSocket disconnected: client-{} from {}", client_id, ip);
     }
 }
 
@@ -1145,6 +1220,7 @@ pub async fn run_server(
     let (event_broadcast, _) = broadcast::channel::<SequencedItem>(1_000_000);
     let (tps_tx, tps_rx) = watch::channel(0usize);
     let (contention_tx, contention_rx) = watch::channel(None::<ContentionData>);
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
 
     let base_filter = if is_restricted_mode() {
         info!("Running in restricted mode");
@@ -1166,6 +1242,8 @@ pub async fn run_server(
         lifecycle_tracker: RwLock::new(BlockLifecycleTracker::new()),
         server_seqno: AtomicU64::new(0),
         event_history: Mutex::new(VecDeque::with_capacity(MAX_EVENT_HISTORY)),
+        ip_connections: Mutex::new(HashMap::new()),
+        shutdown: shutdown_rx,
     });
 
     tokio::spawn(run_event_forwarder(
@@ -1218,9 +1296,37 @@ pub async fn run_server(
     info!("              http://{}/v1/blocks/lifecycle", addr);
     info!("  Metrics:    http://{}/metrics", addr);
     info!("  Health:     http://{}/health", addr);
+    info!(
+        "  Limits:     max {}/IP, max {} subscribes/client",
+        MAX_CONNECTIONS_PER_IP, MAX_SUBSCRIBES_PER_CLIENT
+    );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to listen for SIGTERM")
+                .recv()
+                .await;
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
 
+        tokio::select! {
+            _ = ctrl_c => info!("Received SIGINT, draining connections..."),
+            _ = terminate => info!("Received SIGTERM, draining connections..."),
+        }
+        // Notify all connected WebSocket handlers to close gracefully
+        let _ = shutdown_tx.send(());
+    })
+    .await?;
+
+    info!("Gateway shut down gracefully");
     Ok(())
 }
