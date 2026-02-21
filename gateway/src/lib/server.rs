@@ -1102,7 +1102,9 @@ async fn run_event_forwarder(
                         while history.len() > MAX_EVENT_HISTORY {
                             history.pop_front();
                         }
-                        metrics::BROADCAST_QUEUE_USAGE.set(history.len() as f64);
+                        let len = history.len() as f64;
+                        metrics::BROADCAST_QUEUE_USAGE.set(len);
+                        metrics::BROADCAST_QUEUE_USAGE_PCT.set(len / MAX_EVENT_HISTORY as f64 * 100.0);
                     }
                     metrics::WS_EVENTS_TOTAL.inc();
                     // Broadcast raw item for live clients (per-subscription filtering)

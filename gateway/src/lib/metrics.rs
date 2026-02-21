@@ -47,11 +47,21 @@ lazy_static! {
     .unwrap();
 
     /// Block finalization latency in milliseconds (Proposed → Finalized).
-    /// Use rate(sum) / rate(count) for average.
+    ///
+    /// Grafana queries for percentiles:
+    ///   p50:  histogram_quantile(0.50, rate(finalize_latency_ms_bucket[5m]))
+    ///   p95:  histogram_quantile(0.95, rate(finalize_latency_ms_bucket[5m]))
+    ///   p99:  histogram_quantile(0.99, rate(finalize_latency_ms_bucket[5m]))
+    ///   avg:  rate(finalize_latency_ms_sum[5m]) / rate(finalize_latency_ms_count[5m])
     pub static ref FINALIZE_LATENCY_MS: Histogram = register_histogram!(
         "finalize_latency_ms",
         "Block finalization latency in ms (Proposed to Finalized)",
-        vec![50.0, 100.0, 200.0, 400.0, 600.0, 800.0, 1000.0, 1500.0, 2000.0, 5000.0]
+        // Dense buckets around expected Monad finality window for accurate p99
+        vec![
+            25.0, 50.0, 100.0, 150.0, 200.0, 300.0, 400.0, 500.0,
+            600.0, 700.0, 800.0, 900.0, 1000.0, 1200.0, 1500.0,
+            2000.0, 3000.0, 5000.0, 10000.0
+        ]
     )
     .unwrap();
 
@@ -59,6 +69,14 @@ lazy_static! {
     pub static ref BROADCAST_QUEUE_USAGE: Gauge = register_gauge!(opts!(
         "broadcast_queue_usage",
         "Number of entries in the broadcast ring buffer"
+    ))
+    .unwrap();
+
+    /// Ring buffer usage as percentage (0–100).
+    /// broadcast_queue_usage_pct = len / capacity * 100
+    pub static ref BROADCAST_QUEUE_USAGE_PCT: Gauge = register_gauge!(opts!(
+        "broadcast_queue_usage_pct",
+        "Broadcast ring buffer usage as percentage of capacity"
     ))
     .unwrap();
 }
