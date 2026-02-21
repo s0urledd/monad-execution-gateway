@@ -7,6 +7,9 @@ pub mod contention_tracker {
 pub mod event_filter {
     include!("lib/event_filter.rs");
 }
+pub mod metrics {
+    include!("lib/metrics.rs");
+}
 pub mod event_listener {
     include!("lib/event_listener.rs");
 }
