@@ -1,0 +1,21 @@
+{
+  "name": "@monad-labs/webhook-relay",
+  "version": "0.1.0",
+  "description": "Webhook relay sidecar — forwards gateway lifecycle events to HTTP POST endpoints",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "keywords": ["monad", "webhook", "execution-events"],
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

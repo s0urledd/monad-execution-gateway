@@ -461,10 +461,18 @@ export interface GatewayClientOptions {
   channel?: Channel;
   /** Auto-reconnect on disconnect (default: true) */
   autoReconnect?: boolean;
-  /** Reconnect delay in ms (default: 3000) */
+  /** Initial reconnect delay in ms — doubles each attempt (default: 1000) */
   reconnectDelay?: number;
+  /** Cap for exponential backoff in ms (default: 30000) */
+  maxReconnectDelay?: number;
   /** Maximum reconnect attempts (default: Infinity) */
   maxReconnectAttempts?: number;
+  /**
+   * Heartbeat timeout in ms.  If no message arrives within this window
+   * the client considers the connection dead and triggers a reconnect.
+   * Set to 0 to disable. (default: 10000)
+   */
+  heartbeatTimeout?: number;
 }
 
 // ─── Client Events ──────────────────────────────────────────────────
@@ -480,5 +488,6 @@ export interface GatewayClientEvents {
   resume: (info: ResumeMode) => void;
   connected: () => void;
   disconnected: () => void;
+  reconnecting: (attempt: number, delayMs: number) => void;
   error: (error: Error) => void;
 }
