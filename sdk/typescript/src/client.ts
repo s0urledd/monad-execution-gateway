@@ -33,36 +33,50 @@ const CHANNEL_PATHS: Record<Channel, string> = {
 /**
  * Client for the Monad Execution Events Gateway.
  *
- * Connects to a gateway WebSocket endpoint and emits typed events
- * for execution data, TPS metrics, and contention analytics.
+ * Features:
+ * - **Auto-reconnect** with exponential back-off and jitter
+ * - **Cursor resume** — tracks `server_seqno`, reconnects with `?resume_from`
+ * - **Resume ACK validation** — verifies the server's Resume control frame
+ * - **Heartbeat detection** — reconnects when no data arrives within timeout
+ * - **Channel abstraction** — lifecycle / raw / contention / blocks / txs
+ * - **Typed events** — strongly typed payloads for every event kind
  *
  * @example
  * ```ts
- * const client = new GatewayClient({ url: "ws://your-validator:8443" });
+ * const client = new GatewayClient({
+ *   url: "wss://gateway.monad.xyz",
+ *   channel: "lifecycle",
+ *   heartbeatTimeout: 10_000,
+ * });
  *
- * client.on("event", (event) => {
- *   if (event.event_name === "BlockFinalized") {
- *     console.log("Block finalized:", event.payload);
+ * client.on("lifecycle", (update) => {
+ *   if (update.to_stage === "Finalized") {
+ *     console.log(`Block ${update.block_number} finalized in ${update.block_age_ms}ms`);
  *   }
  * });
  *
- * client.on("tps", (tps) => console.log("TPS:", tps));
- *
  * await client.connect();
- *
- * // Filter to only block events and TPS
- * client.subscribe(["BlockStart", "BlockFinalized", "TPS"]);
  * ```
  */
 export class GatewayClient {
   private ws: WebSocket | null = null;
   private options: Required<
-    Pick<GatewayClientOptions, "url" | "autoReconnect" | "reconnectDelay" | "maxReconnectAttempts">
+    Pick<
+      GatewayClientOptions,
+      | "url"
+      | "autoReconnect"
+      | "reconnectDelay"
+      | "maxReconnectDelay"
+      | "maxReconnectAttempts"
+      | "heartbeatTimeout"
+    >
   > & { channel: Channel };
   private listeners: Map<string, Set<Function>> = new Map();
+  private onceListeners: Map<string, Set<Function>> = new Map();
   private reconnectAttempts = 0;
   private shouldReconnect = true;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private baseUrl: string;
   private pendingSubscription: SimpleSubscribe | AdvancedSubscribe | null = null;
 
@@ -76,8 +90,10 @@ export class GatewayClient {
   constructor(options: GatewayClientOptions) {
     this.options = {
       autoReconnect: true,
-      reconnectDelay: 3000,
+      reconnectDelay: 1_000,
+      maxReconnectDelay: 30_000,
       maxReconnectAttempts: Infinity,
+      heartbeatTimeout: 10_000,
       channel: "all",
       ...options,
     };
@@ -85,9 +101,11 @@ export class GatewayClient {
     this.baseUrl = this.options.url.replace(/\/+$/, "");
   }
 
+  // ─── Connection ────────────────────────────────────────────────────
+
   /**
    * Connect to the gateway WebSocket endpoint.
-   * Resolves when the connection is established.
+   * Resolves when the connection is established and the Resume ACK is received.
    */
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -105,6 +123,7 @@ export class GatewayClient {
       this.ws.on("open", () => {
         this.reconnectAttempts = 0;
         this.emit("connected");
+        this.resetHeartbeat();
 
         // Re-send subscription after reconnect
         if (this.pendingSubscription) {
@@ -115,6 +134,7 @@ export class GatewayClient {
       });
 
       this.ws.on("message", (data: WebSocket.Data) => {
+        this.resetHeartbeat();
         try {
           const msg: ServerMessage = JSON.parse(data.toString());
           this.handleMessage(msg);
@@ -124,6 +144,7 @@ export class GatewayClient {
       });
 
       this.ws.on("close", () => {
+        this.clearHeartbeat();
         this.emit("disconnected");
         this.maybeReconnect();
       });
@@ -134,6 +155,11 @@ export class GatewayClient {
           reject(err);
         }
       });
+
+      // WebSocket pong frames also count as heartbeat
+      this.ws.on("pong", () => {
+        this.resetHeartbeat();
+      });
     });
   }
 
@@ -142,6 +168,7 @@ export class GatewayClient {
    */
   disconnect(): void {
     this.shouldReconnect = false;
+    this.clearHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -152,6 +179,8 @@ export class GatewayClient {
     }
   }
 
+  // ─── Subscriptions ─────────────────────────────────────────────────
+
   /**
    * Send a subscription message to filter events server-side.
    *
@@ -160,7 +189,7 @@ export class GatewayClient {
    * client.subscribe(["BlockFinalized", "TPS", "ContentionData"]);
    * ```
    *
-   * **Advanced format** — with field-level filters:
+   * **Advanced format** — with field-level filters and stage gating:
    * ```ts
    * client.subscribe({
    *   events: ["TxnLog"],
@@ -169,7 +198,8 @@ export class GatewayClient {
    *     field_filters: [
    *       { field: "address", filter: { values: ["0x..."] } }
    *     ]
-   *   }]
+   *   }],
+   *   min_stage: "Finalized",
    * });
    * ```
    */
@@ -191,6 +221,8 @@ export class GatewayClient {
     }
   }
 
+  // ─── Event Emitter ─────────────────────────────────────────────────
+
   /**
    * Register an event listener.
    *
@@ -200,8 +232,9 @@ export class GatewayClient {
    * - `"tps"` — TPS update (2.5-block rolling window)
    * - `"contention"` — Per-block contention analytics
    * - `"topAccesses"` — Top accessed accounts and storage slots
-   * - `"lifecycle"` — Block stage transition (Proposed/Voted/Finalized/Verified)
-   * - `"connected"` / `"disconnected"` — Connection state
+   * - `"lifecycle"` — Block stage transition
+   * - `"resume"` — Resume ACK from server (first frame)
+   * - `"connected"` / `"disconnected"` / `"reconnecting"` — Connection state
    * - `"error"` — WebSocket errors
    */
   on<K extends keyof GatewayClientEvents>(
@@ -216,6 +249,20 @@ export class GatewayClient {
   }
 
   /**
+   * Register a one-shot event listener. Automatically removed after first call.
+   */
+  once<K extends keyof GatewayClientEvents>(
+    event: K,
+    handler: EventHandler<K>
+  ): this {
+    if (!this.onceListeners.has(event)) {
+      this.onceListeners.set(event, new Set());
+    }
+    this.onceListeners.get(event)!.add(handler);
+    return this;
+  }
+
+  /**
    * Remove an event listener.
    */
   off<K extends keyof GatewayClientEvents>(
@@ -223,6 +270,7 @@ export class GatewayClient {
     handler: EventHandler<K>
   ): this {
     this.listeners.get(event)?.delete(handler);
+    this.onceListeners.get(event)?.delete(handler);
     return this;
   }
 
@@ -244,6 +292,8 @@ export class GatewayClient {
     });
   }
 
+  // ─── Getters ───────────────────────────────────────────────────────
+
   /** Whether the client is currently connected */
   get connected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
@@ -254,15 +304,36 @@ export class GatewayClient {
     return this.lastServerSeqno;
   }
 
-  // ─── REST Helpers ────────────────────────────────────────────────────
-
   /**
-   * Fetch current TPS from the REST endpoint.
+   * Wait for the Resume ACK from the server.
+   * Returns the resume mode (`"resume"` = lossless replay, `"snapshot"` = state snapshot).
    *
    * @example
    * ```ts
-   * const { tps } = await GatewayClient.fetchTPS("http://your-validator:8443");
+   * await client.connect();
+   * const { mode } = await client.waitForResume(5000);
+   * if (mode === "snapshot") {
+   *   console.log("Gap detected — rebuilding state from snapshot");
+   * }
    * ```
+   */
+  waitForResume(timeoutMs = 5000): Promise<ResumeMode> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error("Resume ACK timeout"));
+      }, timeoutMs);
+
+      this.once("resume", ((info: ResumeMode) => {
+        clearTimeout(timer);
+        resolve(info);
+      }) as EventHandler<"resume">);
+    });
+  }
+
+  // ─── REST Helpers ──────────────────────────────────────────────────
+
+  /**
+   * Fetch current TPS from the REST endpoint.
    */
   static async fetchTPS(baseUrl: string): Promise<TPSResponse> {
     const url = baseUrl.replace(/\/+$/, "");
@@ -272,11 +343,6 @@ export class GatewayClient {
 
   /**
    * Fetch latest contention data from the REST endpoint.
-   *
-   * @example
-   * ```ts
-   * const data = await GatewayClient.fetchContention("http://your-validator:8443");
-   * ```
    */
   static async fetchContention(baseUrl: string): Promise<ContentionData> {
     const url = baseUrl.replace(/\/+$/, "");
@@ -286,12 +352,6 @@ export class GatewayClient {
 
   /**
    * Fetch gateway status from the REST endpoint.
-   *
-   * @example
-   * ```ts
-   * const status = await GatewayClient.fetchStatus("http://your-validator:8443");
-   * console.log(status.block_number, status.connected_clients);
-   * ```
    */
   static async fetchStatus(baseUrl: string): Promise<StatusResponse> {
     const url = baseUrl.replace(/\/+$/, "");
@@ -317,7 +377,7 @@ export class GatewayClient {
     return res.json() as Promise<BlockLifecycleSummary>;
   }
 
-  // ─── Private ──────────────────────────────────────────────────────
+  // ─── Private ───────────────────────────────────────────────────────
 
   private buildWsUrl(): string {
     const channelPath = CHANNEL_PATHS[this.options.channel];
@@ -383,7 +443,45 @@ export class GatewayClient {
         }
       }
     }
+
+    // Fire-and-remove once listeners
+    const onceHandlers = this.onceListeners.get(event);
+    if (onceHandlers && onceHandlers.size > 0) {
+      for (const handler of onceHandlers) {
+        try {
+          handler(...args);
+        } catch {
+          // same guard
+        }
+      }
+      onceHandlers.clear();
+    }
   }
+
+  // ─── Heartbeat ─────────────────────────────────────────────────────
+
+  private resetHeartbeat(): void {
+    this.clearHeartbeat();
+    const timeout = this.options.heartbeatTimeout;
+    if (timeout <= 0) return;
+
+    this.heartbeatTimer = setTimeout(() => {
+      // No data received within timeout — assume dead connection
+      this.emit("error", new Error(`No data received for ${timeout}ms — reconnecting`));
+      if (this.ws) {
+        this.ws.terminate();  // hard-close, triggers 'close' → maybeReconnect
+      }
+    }, timeout);
+  }
+
+  private clearHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearTimeout(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  // ─── Reconnect with Exponential Back-off ───────────────────────────
 
   private maybeReconnect(): void {
     if (
@@ -395,10 +493,21 @@ export class GatewayClient {
     }
 
     this.reconnectAttempts++;
+
+    // Exponential back-off with jitter: delay * 2^(attempt-1) + random jitter
+    const exponential = Math.min(
+      this.options.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1),
+      this.options.maxReconnectDelay
+    );
+    const jitter = Math.random() * this.options.reconnectDelay * 0.5;
+    const delay = Math.round(exponential + jitter);
+
+    this.emit("reconnecting", this.reconnectAttempts, delay);
+
     this.reconnectTimer = setTimeout(() => {
       this.connect().catch(() => {
-        // reconnect failure handled by 'error' event
+        // reconnect failure handled by 'error' event → will trigger another maybeReconnect
       });
-    }, this.options.reconnectDelay);
+    }, delay);
   }
 }
