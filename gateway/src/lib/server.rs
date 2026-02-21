@@ -7,6 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use alloy_primitives::{Address, B256};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -173,6 +174,24 @@ impl GatewayState {
     }
 }
 
+/// Extract the real client IP from proxy headers, falling back to the socket address.
+/// Checks X-Forwarded-For (first IP) then X-Real-IP, then ConnectInfo.
+fn real_ip(headers: &HeaderMap, socket_ip: IpAddr) -> IpAddr {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = xff.split(',').next() {
+            if let Ok(ip) = first.trim().parse::<IpAddr>() {
+                return ip;
+            }
+        }
+    }
+    if let Some(xri) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        if let Ok(ip) = xri.trim().parse::<IpAddr>() {
+            return ip;
+        }
+    }
+    socket_ip
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Channels & Subscriptions
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -186,7 +205,7 @@ enum Channel {
     Lifecycle,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct ClientSubscription {
     event_names: HashSet<EventName>,
     include_tps: bool,
@@ -406,47 +425,57 @@ impl TPSTracker {
 
 async fn ws_all(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Query(q): Query<WsQuery>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<GatewayState>>,
 ) -> impl IntoResponse {
-    try_upgrade(ws, state, Channel::All, q.resume_from, addr.ip())
+    let ip = real_ip(&headers, addr.ip());
+    try_upgrade(ws, state, Channel::All, q.resume_from, ip)
 }
 
 async fn ws_blocks(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Query(q): Query<WsQuery>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<GatewayState>>,
 ) -> impl IntoResponse {
-    try_upgrade(ws, state, Channel::Blocks, q.resume_from, addr.ip())
+    let ip = real_ip(&headers, addr.ip());
+    try_upgrade(ws, state, Channel::Blocks, q.resume_from, ip)
 }
 
 async fn ws_txs(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Query(q): Query<WsQuery>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<GatewayState>>,
 ) -> impl IntoResponse {
-    try_upgrade(ws, state, Channel::Transactions, q.resume_from, addr.ip())
+    let ip = real_ip(&headers, addr.ip());
+    try_upgrade(ws, state, Channel::Transactions, q.resume_from, ip)
 }
 
 async fn ws_contention_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Query(q): Query<WsQuery>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<GatewayState>>,
 ) -> impl IntoResponse {
-    try_upgrade(ws, state, Channel::Contention, q.resume_from, addr.ip())
+    let ip = real_ip(&headers, addr.ip());
+    try_upgrade(ws, state, Channel::Contention, q.resume_from, ip)
 }
 
 async fn ws_lifecycle(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Query(q): Query<WsQuery>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<GatewayState>>,
 ) -> impl IntoResponse {
-    try_upgrade(ws, state, Channel::Lifecycle, q.resume_from, addr.ip())
+    let ip = real_ip(&headers, addr.ip());
+    try_upgrade(ws, state, Channel::Lifecycle, q.resume_from, ip)
 }
 
 fn try_upgrade(
@@ -749,7 +778,7 @@ async fn handle_ws(
     // ── Live event loop ──
     let mut events_buf: Vec<SerializableEventData> = Vec::new();
     let mut messages_buf: Vec<(u64, ServerMessage)> = Vec::new();
-    let mut subscribe_count: usize = 0;
+    let mut unique_subscribe_count: usize = 0;
 
     loop {
         tokio::select! {
@@ -803,14 +832,18 @@ async fn handle_ws(
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if subscribe_count >= MAX_SUBSCRIBES_PER_CLIENT {
-                            metrics::WS_REJECTED_SUB_LIMIT.inc();
-                            warn!("client-{}: subscribe limit reached ({}), ignoring", client_id, MAX_SUBSCRIBES_PER_CLIENT);
-                            continue;
-                        }
                         if let Some(new_sub) = parse_subscribe(&text) {
-                            subscribe_count += 1;
-                            info!("client-{} updated subscription ({}/{})", client_id, subscribe_count, MAX_SUBSCRIBES_PER_CLIENT);
+                            // Skip duplicate subscriptions (same filter = free, doesn't count)
+                            if new_sub == subscription {
+                                continue;
+                            }
+                            if unique_subscribe_count >= MAX_SUBSCRIBES_PER_CLIENT {
+                                metrics::WS_REJECTED_SUB_LIMIT.inc();
+                                warn!("client-{}: unique subscribe limit reached ({}), ignoring", client_id, MAX_SUBSCRIBES_PER_CLIENT);
+                                continue;
+                            }
+                            unique_subscribe_count += 1;
+                            info!("client-{} updated subscription ({}/{})", client_id, unique_subscribe_count, MAX_SUBSCRIBES_PER_CLIENT);
                             subscription = new_sub;
                         }
                     }
