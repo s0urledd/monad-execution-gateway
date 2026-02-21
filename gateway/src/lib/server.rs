@@ -17,10 +17,15 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info, warn};
 
+use prometheus::{Encoder, TextEncoder};
+
 use crate::block_lifecycle::{BlockLifecycleTracker, BlockLifecycleUpdate, BlockStage};
 use crate::contention_tracker::{ContentionData, ContentionTracker};
-use crate::event_filter::{is_restricted_mode, load_restricted_filters, EventFilter, EventFilterSpec};
+use crate::event_filter::{
+    is_restricted_mode, load_restricted_filters, EventFilter, EventFilterSpec,
+};
 use crate::event_listener::{EventData, EventName};
+use crate::metrics;
 use crate::serializable_event::SerializableEventData;
 use crate::top_k_tracker::{AccessEntry, TopKTracker};
 
@@ -287,7 +292,9 @@ fn parse_subscribe(text: &str) -> Option<ClientSubscription> {
 
     let (items, filters, min_stage) = match msg {
         SubscribeMessage::Simple { subscribe } => (subscribe, vec![], None),
-        SubscribeMessage::Advanced { subscribe } => (subscribe.events, subscribe.filters, subscribe.min_stage),
+        SubscribeMessage::Advanced { subscribe } => {
+            (subscribe.events, subscribe.filters, subscribe.min_stage)
+        }
     };
 
     let mut event_names = HashSet::new();
@@ -305,7 +312,8 @@ fn parse_subscribe(text: &str) -> Option<ClientSubscription> {
             "Lifecycle" => include_lifecycle = true,
             name => {
                 // Try PascalCase serde deserialization
-                if let Ok(event_name) = serde_json::from_str::<EventName>(&format!("\"{}\"", name)) {
+                if let Ok(event_name) = serde_json::from_str::<EventName>(&format!("\"{}\"", name))
+                {
                     event_names.insert(event_name);
                 }
             }
@@ -361,23 +369,43 @@ impl TPSTracker {
 // WebSocket Handlers
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async fn ws_all(ws: WebSocketUpgrade, Query(q): Query<WsQuery>, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+async fn ws_all(
+    ws: WebSocketUpgrade,
+    Query(q): Query<WsQuery>,
+    State(state): State<Arc<GatewayState>>,
+) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::All, q.resume_from))
 }
 
-async fn ws_blocks(ws: WebSocketUpgrade, Query(q): Query<WsQuery>, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+async fn ws_blocks(
+    ws: WebSocketUpgrade,
+    Query(q): Query<WsQuery>,
+    State(state): State<Arc<GatewayState>>,
+) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Blocks, q.resume_from))
 }
 
-async fn ws_txs(ws: WebSocketUpgrade, Query(q): Query<WsQuery>, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+async fn ws_txs(
+    ws: WebSocketUpgrade,
+    Query(q): Query<WsQuery>,
+    State(state): State<Arc<GatewayState>>,
+) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Transactions, q.resume_from))
 }
 
-async fn ws_contention_handler(ws: WebSocketUpgrade, Query(q): Query<WsQuery>, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+async fn ws_contention_handler(
+    ws: WebSocketUpgrade,
+    Query(q): Query<WsQuery>,
+    State(state): State<Arc<GatewayState>>,
+) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Contention, q.resume_from))
 }
 
-async fn ws_lifecycle(ws: WebSocketUpgrade, Query(q): Query<WsQuery>, State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+async fn ws_lifecycle(
+    ws: WebSocketUpgrade,
+    Query(q): Query<WsQuery>,
+    State(state): State<Arc<GatewayState>>,
+) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state, Channel::Lifecycle, q.resume_from))
 }
 
@@ -438,8 +466,14 @@ fn build_replay(channel: &Channel, state: &GatewayState) -> Vec<ServerMessage> {
     msgs
 }
 
-async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel, resume_from: Option<u64>) {
+async fn handle_ws(
+    socket: WebSocket,
+    state: Arc<GatewayState>,
+    channel: Channel,
+    resume_from: Option<u64>,
+) {
     let client_id = state.connected_clients.fetch_add(1, Ordering::Relaxed);
+    metrics::WS_ACTIVE_CONNECTIONS.inc();
     info!(
         "WebSocket connected: client-{} (channel: {:?}, resume_from: {:?})",
         client_id, channel, resume_from
@@ -466,7 +500,12 @@ async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel
     // Helper: try_send with backpressure tracking
     let mut drop_count: u64 = 0;
     let mut total_sent: u64 = 0;
-    let mut send_or_drop = |client_tx: &mpsc::Sender<String>, json: String, client_id: usize, drop_count: &mut u64, total_sent: &mut u64| -> bool {
+    let mut send_or_drop = |client_tx: &mpsc::Sender<String>,
+                            json: String,
+                            client_id: usize,
+                            drop_count: &mut u64,
+                            total_sent: &mut u64|
+     -> bool {
         match client_tx.try_send(json) {
             Ok(_) => {
                 *total_sent += 1;
@@ -474,6 +513,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 *drop_count += 1;
+                metrics::WS_DROPPED_TOTAL.inc();
                 if *drop_count % 1000 == 0 {
                     warn!(
                         "client-{}: backpressure — dropped {} messages (sent {})",
@@ -496,10 +536,21 @@ async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel
     // ── Helper: send a control frame and bail on failure ──
     macro_rules! send_control {
         ($msg:expr) => {
-            let wire = WireMessage { server_seqno: state.server_seqno.load(Ordering::Relaxed), message: &$msg };
+            let wire = WireMessage {
+                server_seqno: state.server_seqno.load(Ordering::Relaxed),
+                message: &$msg,
+            };
             if let Ok(json) = serde_json::to_string(&wire) {
-                if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
+                if !send_or_drop(
+                    &client_tx,
+                    json,
+                    client_id,
+                    &mut drop_count,
+                    &mut total_sent,
+                ) {
                     state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+                    metrics::WS_ACTIVE_CONNECTIONS.dec();
+                    metrics::WS_DISCONNECT_TOTAL.inc();
                     send_task.abort();
                     return;
                 }
@@ -508,12 +559,20 @@ async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel
     }
 
     // ── Helper: send snapshot replay (TPS / contention / lifecycle state) ──
-    let send_snapshot = |client_tx: &mpsc::Sender<String>, state: &Arc<GatewayState>, channel: &Channel,
-                         client_id: usize, drop_count: &mut u64, total_sent: &mut u64| -> bool {
+    let send_snapshot = |client_tx: &mpsc::Sender<String>,
+                         state: &Arc<GatewayState>,
+                         channel: &Channel,
+                         client_id: usize,
+                         drop_count: &mut u64,
+                         total_sent: &mut u64|
+     -> bool {
         let replay_msgs = build_replay(channel, state);
         let current_seqno = state.server_seqno.load(Ordering::Relaxed);
         for msg in &replay_msgs {
-            let wire = WireMessage { server_seqno: current_seqno, message: msg };
+            let wire = WireMessage {
+                server_seqno: current_seqno,
+                message: msg,
+            };
             if let Ok(json) = serde_json::to_string(&wire) {
                 if !send_or_drop(client_tx, json, client_id, drop_count, total_sent) {
                     return false;
@@ -521,7 +580,11 @@ async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel
             }
         }
         if !replay_msgs.is_empty() {
-            info!("client-{} snapshot: sent {} state messages", client_id, replay_msgs.len());
+            info!(
+                "client-{} snapshot: sent {} state messages",
+                client_id,
+                replay_msgs.len()
+            );
         }
         true
     };
@@ -541,26 +604,53 @@ async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel
                 );
                 vec![]
             } else {
-                history.iter().filter(|e| e.seqno > cursor).cloned().collect()
+                history
+                    .iter()
+                    .filter(|e| e.seqno > cursor)
+                    .cloned()
+                    .collect()
             }
         };
 
         if entries.is_empty() {
             // Cursor too old or buffer empty → snapshot fallback
-            send_control!(ServerMessage::Resume(ResumeMode { mode: "snapshot".into() }));
-            if !send_snapshot(&client_tx, &state, &channel, client_id, &mut drop_count, &mut total_sent) {
+            metrics::RESUME_SNAPSHOT_TOTAL.inc();
+            send_control!(ServerMessage::Resume(ResumeMode {
+                mode: "snapshot".into()
+            }));
+            if !send_snapshot(
+                &client_tx,
+                &state,
+                &channel,
+                client_id,
+                &mut drop_count,
+                &mut total_sent,
+            ) {
                 state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+                metrics::WS_ACTIVE_CONNECTIONS.dec();
+                metrics::WS_DISCONNECT_TOTAL.inc();
                 send_task.abort();
                 return;
             }
             last_sent_seqno = state.server_seqno.load(Ordering::Relaxed);
         } else {
             // Cursor hit → send Resume control, then replay stored JSON verbatim
-            send_control!(ServerMessage::Resume(ResumeMode { mode: "resume".into() }));
+            metrics::RESUME_DELTA_TOTAL.inc();
+            send_control!(ServerMessage::Resume(ResumeMode {
+                mode: "resume".into()
+            }));
             let replay_count = entries.len();
             for entry in &entries {
-                if !send_or_drop(&client_tx, entry.json.clone(), client_id, &mut drop_count, &mut total_sent) {
+                if !send_or_drop(
+                    &client_tx,
+                    entry.json.clone(),
+                    client_id,
+                    &mut drop_count,
+                    &mut total_sent,
+                ) {
                     state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+                    metrics::WS_ACTIVE_CONNECTIONS.dec();
+                    metrics::WS_DISCONNECT_TOTAL.inc();
                     send_task.abort();
                     return;
                 }
@@ -573,9 +663,21 @@ async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel
         }
     } else {
         // Fresh connect — snapshot replay
-        send_control!(ServerMessage::Resume(ResumeMode { mode: "snapshot".into() }));
-        if !send_snapshot(&client_tx, &state, &channel, client_id, &mut drop_count, &mut total_sent) {
+        metrics::RESUME_SNAPSHOT_TOTAL.inc();
+        send_control!(ServerMessage::Resume(ResumeMode {
+            mode: "snapshot".into()
+        }));
+        if !send_snapshot(
+            &client_tx,
+            &state,
+            &channel,
+            client_id,
+            &mut drop_count,
+            &mut total_sent,
+        ) {
             state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+            metrics::WS_ACTIVE_CONNECTIONS.dec();
+            metrics::WS_DISCONNECT_TOTAL.inc();
             send_task.abort();
             return;
         }
@@ -654,6 +756,8 @@ async fn handle_ws(socket: WebSocket, state: Arc<GatewayState>, channel: Channel
     drop(client_tx);
     let _ = send_task.await;
     state.connected_clients.fetch_sub(1, Ordering::Relaxed);
+    metrics::WS_ACTIVE_CONNECTIONS.dec();
+    metrics::WS_DISCONNECT_TOTAL.inc();
     if drop_count > 0 {
         info!(
             "WebSocket disconnected: client-{} (sent: {}, dropped: {})",
@@ -725,11 +829,19 @@ async fn rest_contention(State(state): State<Arc<GatewayState>>) -> impl IntoRes
 }
 
 async fn rest_status(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let last = state.last_event_time.load(Ordering::Relaxed);
     let newest_seqno = state.server_seqno.load(Ordering::Relaxed);
-    let oldest_seqno = state.event_history.lock().unwrap()
-        .front().map(|e| e.seqno).unwrap_or(0);
+    let oldest_seqno = state
+        .event_history
+        .lock()
+        .unwrap()
+        .front()
+        .map(|e| e.seqno)
+        .unwrap_or(0);
 
     Json(serde_json::json!({
         "status": if now.saturating_sub(last) <= 10 || last == 0 { "healthy" } else { "degraded" },
@@ -744,7 +856,10 @@ async fn rest_status(State(state): State<Arc<GatewayState>>) -> impl IntoRespons
 }
 
 async fn rest_health(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let last = state.last_event_time.load(Ordering::Relaxed);
     let age = now.saturating_sub(last);
 
@@ -773,6 +888,17 @@ async fn rest_block_lifecycle(
     }
 }
 
+async fn rest_metrics() -> impl IntoResponse {
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let mut buffer = Vec::new();
+    encoder.encode(&metric_families, &mut buffer).unwrap();
+    (
+        [(axum::http::header::CONTENT_TYPE, encoder.format_type())],
+        buffer,
+    )
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Replay Serialization
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -796,7 +922,10 @@ fn serialize_for_replay(seqno: u64, item: &EventDataOrMetrics, state: &GatewaySt
         EventDataOrMetrics::TopAccesses(data) => ServerMessage::TopAccesses(data.clone()),
         EventDataOrMetrics::Lifecycle(update) => ServerMessage::Lifecycle(update.clone()),
     };
-    let wire = WireMessage { server_seqno: seqno, message: &msg };
+    let wire = WireMessage {
+        server_seqno: seqno,
+        message: &msg,
+    };
     serde_json::to_string(&wire).unwrap_or_default()
 }
 
@@ -905,6 +1034,7 @@ async fn run_event_forwarder(
 
                             let mut lc = state.lifecycle_tracker.write().unwrap();
                             if let Some(update) = lc.advance_stage(block_id, block_number, BlockStage::Finalized, event_data.timestamp_ns) {
+                                metrics::FINALIZE_LATENCY_MS.observe(update.block_age_ms);
                                 lifecycle_event = Some(EventDataOrMetrics::Lifecycle(update));
                             }
                         }
@@ -972,7 +1102,9 @@ async fn run_event_forwarder(
                         while history.len() > MAX_EVENT_HISTORY {
                             history.pop_front();
                         }
+                        metrics::BROADCAST_QUEUE_USAGE.set(history.len() as f64);
                     }
+                    metrics::WS_EVENTS_TOTAL.inc();
                     // Broadcast raw item for live clients (per-subscription filtering)
                     let si = SequencedItem { seqno, item };
                     let _ = tx.send(si);
@@ -1058,7 +1190,12 @@ pub async fn run_server(
         .route("/v1/contention", get(rest_contention))
         .route("/v1/status", get(rest_status))
         .route("/v1/blocks/lifecycle", get(rest_lifecycle))
-        .route("/v1/blocks/:block_number/lifecycle", get(rest_block_lifecycle))
+        .route(
+            "/v1/blocks/:block_number/lifecycle",
+            get(rest_block_lifecycle),
+        )
+        // Metrics
+        .route("/metrics", get(rest_metrics))
         // Health
         .route("/health", get(rest_health))
         // Backward compat: root path = all events (same handler, supports ?resume_from)
@@ -1076,6 +1213,7 @@ pub async fn run_server(
     info!("              http://{}/v1/contention", addr);
     info!("              http://{}/v1/status", addr);
     info!("              http://{}/v1/blocks/lifecycle", addr);
+    info!("  Metrics:    http://{}/metrics", addr);
     info!("  Health:     http://{}/health", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
