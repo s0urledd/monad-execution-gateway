@@ -10,7 +10,7 @@
  * - Contract co-access patterns
  *
  * Usage:
- *   npx ts-node examples/monitor-contention.ts ws://your-validator:8443
+ *   npx ts-node examples/monitor-contention.ts ws://your-node:8443
  */
 
 import { GatewayClient } from "../sdk/typescript/src";

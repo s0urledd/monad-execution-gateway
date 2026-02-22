@@ -2,8 +2,8 @@
 # Quick test: connect to the gateway and print raw events
 #
 # Usage:
-#   ./examples/websocket-test.sh ws://your-validator:8443/v1/ws
-#   ./examples/websocket-test.sh ws://your-validator:8443/v1/ws/blocks
+#   ./examples/websocket-test.sh ws://your-node:8443/v1/ws
+#   ./examples/websocket-test.sh ws://your-node:8443/v1/ws/blocks
 #
 # Requires: websocat (cargo install websocat)
 

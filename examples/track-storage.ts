@@ -10,7 +10,7 @@
  * Usage:
  *   ALLOW_UNRESTRICTED_FILTERS=1 must be set on the gateway for StorageAccess events.
  *
- *   npx ts-node examples/track-storage.ts ws://your-validator:8443 0xYourContract
+ *   npx ts-node examples/track-storage.ts ws://your-node:8443 0xYourContract
  */
 
 import { GatewayClient } from "../sdk/typescript/src";

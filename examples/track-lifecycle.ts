@@ -5,7 +5,7 @@
  * Each stage transition includes timing data showing consensus performance.
  *
  * Usage:
- *   npx ts-node examples/track-lifecycle.ts ws://your-validator:8443
+ *   npx ts-node examples/track-lifecycle.ts ws://your-node:8443
  */
 
 import { GatewayClient, type BlockLifecycleUpdate } from "../sdk/typescript/src";

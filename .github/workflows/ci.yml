@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  gateway:
+    name: Gateway (Rust)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/llvm.asc
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" | sudo tee /etc/apt/sources.list.d/llvm-19.list
+          sudo apt-get update
+          sudo apt-get install -y clang-19 libclang-19-dev libzstd-dev cmake gcc g++
+
+      - name: Rust cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check
+        run: cargo check --release
+        working-directory: gateway
+        env:
+          LLVM_CONFIG_PATH: /usr/bin/llvm-config-19
+
+      - name: Test
+        run: cargo test --release
+        working-directory: gateway
+        env:
+          LLVM_CONFIG_PATH: /usr/bin/llvm-config-19
+
+      - name: Clippy
+        run: cargo clippy --release -- -D warnings
+        working-directory: gateway
+        env:
+          LLVM_CONFIG_PATH: /usr/bin/llvm-config-19
+
+  sdk-typescript:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: sdk/typescript
+      - run: npx tsc --noEmit
+        working-directory: sdk/typescript
+
+  webhook-relay:
+    name: Webhook Relay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: webhook-relay
+      - run: npx tsc --noEmit
+        working-directory: webhook-relay
