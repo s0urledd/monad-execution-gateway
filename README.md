@@ -39,11 +39,11 @@ All WebSocket endpoints accept `?resume_from=<server_seqno>` for lossless reconn
 ## TypeScript SDK
 
 ```bash
-npm install @monad-labs/execution-events
+npm install monad-execution-events
 ```
 
 ```typescript
-import { GatewayClient } from "@monad-labs/execution-events";
+import { GatewayClient } from "monad-execution-events";
 
 const client = new GatewayClient({
   url: "ws://localhost:8443",

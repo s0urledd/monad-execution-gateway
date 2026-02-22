@@ -1,5 +1,5 @@
 {
-  "name": "@monad-labs/webhook-relay",
+  "name": "monad-webhook-relay",
   "version": "0.1.0",
   "description": "Webhook relay sidecar — forwards gateway lifecycle events to HTTP POST endpoints",
   "main": "dist/index.js",
