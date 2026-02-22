@@ -248,24 +248,22 @@ All metrics exposed at `/metrics` in Prometheus text format.
 
 ### 8.1 Prometheus Scrape
 
+Ready-to-use config at [`ops/prometheus/prometheus.yml`](../ops/prometheus/prometheus.yml):
+
 ```yaml
 scrape_configs:
   - job_name: 'monad-gateway'
-    scrape_interval: 15s
+    scrape_interval: 10s
     static_configs:
       - targets: ['gateway:8443']
     metrics_path: '/metrics'
 ```
 
-### 8.2 Grafana Dashboard Panels
+### 8.2 Grafana Dashboard
 
-Recommended panels:
+Import [`ops/grafana/gateway-dashboard.json`](../ops/grafana/gateway-dashboard.json) into Grafana. The dashboard includes:
 
-1. **Active connections** — `ws_active_connections` gauge
-2. **Event throughput** — `rate(ws_events_total[1m])`
-3. **Drop rate** — `rate(ws_dropped_total[1m])`
-4. **Finalization latency** — `histogram_quantile(0.99, rate(finalize_latency_ms_bucket[5m]))`
-5. **Publish latency** — `histogram_quantile(0.99, rate(event_publish_latency_ns_bucket[5m]))`
-6. **Resume mode distribution** — `rate(resume_delta_total[5m])` vs `rate(resume_snapshot_total[5m])`
-7. **Buffer usage** — `broadcast_queue_usage_pct`
-8. **Memory** — `process_resident_memory_bytes`
+1. **Overview row** — Active connections, event throughput, drop rate, buffer usage, memory, heartbeat timeouts
+2. **Latency SLOs row** — Event publish latency (p50/p99/p99.9), WS send latency (p50/p99), block finalization latency (p50/p95/p99), resume mode distribution
+3. **Throughput row** — Event throughput vs drops, active connections vs disconnects
+4. **Resources row** — Memory (RSS), CPU usage, resume buffer fill level
