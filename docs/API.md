@@ -57,12 +57,36 @@ ws://host:8443/v1/ws?resume_from=12345
 2. On connect with `?resume_from=N`, the server replays all buffered messages with `server_seqno > N`.
 3. The first frame is always a `Resume` control message indicating the mode.
 
-### Resume Control Message
+### Hello Control Message
 
-Sent as the first frame after every connect/reconnect:
+Sent as the **first frame** after every connect. Declares server identity, features, and operational limits:
 
 ```json
-{"server_seqno": 42, "Resume": {"mode": "resume"}}
+{
+  "server_seqno": 0,
+  "Hello": {
+    "wire_version": 1,
+    "server_version": "0.1.0",
+    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter"],
+    "limits": {
+      "resume_buffer_size": 100000,
+      "client_send_buffer": 4096,
+      "slow_client_drop_limit": 10000,
+      "heartbeat_interval_secs": 30,
+      "heartbeat_timeout_secs": 60
+    }
+  }
+}
+```
+
+Client response is optional. See [Wire Protocol](wire.md#31-hello) for full field descriptions.
+
+### Resume Control Message
+
+Sent as the **second frame** after every connect (after `Hello`):
+
+```json
+{"server_seqno": 0, "Resume": {"mode": "resume"}}
 ```
 
 | `mode` | Meaning |
@@ -112,7 +136,7 @@ ws://<GATEWAY_HOST>:8443/v1/ws
 ws://<GATEWAY_HOST>:8443/v1/ws?resume_from=12345
 ```
 
-No authentication required. Once connected, the server sends a `Resume` control frame followed by live data.
+No authentication required. Once connected, the server sends a `Hello` frame (server identity, features, operational limits), then a `Resume` control frame, then live data.
 
 ### Channel Details
 
@@ -186,9 +210,13 @@ Subscriptions replace the current filter. Send a new subscribe message to change
 
 Every message is a JSON object with `server_seqno` and **exactly one** data key.
 
+#### `Hello`
+
+First frame on every connection. See [Hello Control Message](#hello-control-message) above.
+
 #### `Resume`
 
-Control message, always the first frame after connect/reconnect.
+Second frame after connect/reconnect (after `Hello`).
 
 ```json
 {"server_seqno": 0, "Resume": {"mode": "snapshot"}}

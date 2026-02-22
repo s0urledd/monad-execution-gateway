@@ -3,50 +3,51 @@
 ## System Overview
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                         Monad Full Node                         │
-│                                                                      │
-│  ┌────────────────┐     mmap (hugepages)     ┌────────────────────┐  │
-│  │  Execution      │ ──────────────────────── │  Event Ring        │  │
-│  │  Engine (EVM)   │   zero-copy writes       │  (shared memory)   │  │
-│  └────────────────┘                           └────────┬───────────┘  │
-│                                                        │ read         │
-└────────────────────────────────────────────────────────┼──────────────┘
-                                                         │
-                        ┌────────────────────────────────▼──────────────┐
-                        │          Execution Events Gateway             │
-                        │                                               │
-                        │  ┌─────────────┐   ┌──────────────────────┐  │
-                        │  │ Event        │   │ Broadcast            │  │
-                        │  │ Listener     ├──▶│ Channel              │  │
-                        │  │ (ring reader)│   │ (fan-out to clients) │  │
-                        │  └─────────────┘   └──────┬───────────────┘  │
-                        │                           │                   │
-                        │  ┌────────────────────────▼────────────────┐  │
-                        │  │            Per-Client Pipeline           │  │
-                        │  │                                          │  │
-                        │  │  subscription filter → backpressure     │  │
-                        │  │  → bounded channel → WebSocket send     │  │
-                        │  └──────────────────────────────────────────┘  │
-                        │                                               │
-                        │  ┌──────────────────────┐  ┌──────────────┐  │
-                        │  │ Ring Buffer           │  │ REST API     │  │
-                        │  │ (100K pre-serialized  │  │ /v1/tps      │  │
-                        │  │  messages for resume) │  │ /v1/status   │  │
-                        │  └──────────────────────┘  │ /v1/contention│  │
-                        │                             └──────────────┘  │
-                        └───────────────────────────────────────────────┘
-                                  │
-                    ┌─────────────┼─────────────────┐
-                    │             │                  │
-              ┌─────▼─────┐ ┌────▼─────┐ ┌─────────▼───────┐
-              │ TS SDK    │ │ Python   │ │ Webhook Relay   │
-              │ Client    │ │ Client   │ │ (sidecar)       │
-              └───────────┘ └──────────┘ └────────┬────────┘
-                                                   │ HTTP POST
-                                            ┌──────▼──────┐
-                                            │ Your Service│
-                                            └─────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                        Monad Full Node                          │
+│                                                                 │
+│  ┌──────────────┐     mmap (hugepages)     ┌─────────────────┐ │
+│  │  Execution    │ ───────────────────────► │  Event Ring     │ │
+│  │  Engine (EVM) │    zero-copy writes      │  (shared memory)│ │
+│  └──────────────┘                           └────────┬────────┘ │
+│                                                      │ read     │
+└──────────────────────────────────────────────────────┼──────────┘
+                                                       │
+                  ┌────────────────────────────────────▼──────────┐
+                  │           Execution Events Gateway            │
+                  │                                               │
+                  │  ┌──────────────┐   ┌──────────────────────┐ │
+                  │  │ Event        │   │ Broadcast            │ │
+                  │  │ Listener     ├──►│ Channel (1M cap)     │ │
+                  │  │ (ring reader)│   │ (fan-out to clients) │ │
+                  │  └──────────────┘   └──────────┬───────────┘ │
+                  │                                │              │
+                  │  ┌─────────────────────────────▼───────────┐ │
+                  │  │          Per-Client Pipeline             │ │
+                  │  │                                         │ │
+                  │  │  subscription filter ─► backpressure    │ │
+                  │  │  ─► bounded channel ─► WebSocket send   │ │
+                  │  └─────────────────────────────────────────┘ │
+                  │                                               │
+                  │  ┌────────────────────┐ ┌──────────────────┐ │
+                  │  │ Resume Ring Buffer │ │ REST API         │ │
+                  │  │ (100K pre-serial.  │ │ /v1/tps          │ │
+                  │  │  JSON for replay)  │ │ /v1/status       │ │
+                  │  └────────────────────┘ │ /v1/contention   │ │
+                  │                         │ /metrics         │ │
+                  │                         └──────────────────┘ │
+                  └───────────────────────────────────────────────┘
+                                    │
+                  ┌─────────────────┼──────────────────┐
+                  │                 │                   │
+            ┌─────▼──────┐  ┌──────▼──────┐  ┌────────▼────────┐
+            │ TS SDK     │  │ Python SDK  │  │ Webhook Relay   │
+            │ Client     │  │ Client      │  │ (sidecar)       │
+            └────────────┘  └─────────────┘  └────────┬────────┘
+                                                      │ HTTP POST
+                                               ┌──────▼──────┐
+                                               │ Your Service│
+                                               └─────────────┘
 ```
 
 ## Data Flow
@@ -148,27 +149,27 @@ The `commit_stage` field reflects the block's **current** consensus stage at the
 # Stage Model (MonadBFT Consensus)
 
 ```
-                    ┌──────────┐
-         ┌─────────│ Proposed  │─────────┐
-         │         └────┬─────┘          │
-         │              │                │
-         │         ┌────▼─────┐          │
-         │         │  Voted   │          │
-         │         │  (QC)    │──────────┤
-         │         └────┬─────┘          │
-         │              │                │
-         │         ┌────▼──────┐         │
-         │         │ Finalized │         │
-         │         │ (commit)  │─────────┤
-         │         └────┬──────┘         │
-         │              │                │
-         │         ┌────▼──────┐    ┌────▼─────┐
-         │         │ Verified  │    │ Rejected │
-         │         │ (terminal)│    │ (terminal)│
-         │         └───────────┘    └──────────┘
-         │                               ▲
-         └───────────────────────────────┘
-              (rejected from any stage)
+                ┌────────────┐
+     ┌──────────│  Proposed  │──────────┐
+     │          └─────┬──────┘          │
+     │                │                 │
+     │          ┌─────▼──────┐          │
+     │          │   Voted    │          │
+     │          │   (QC)     │──────────┤
+     │          └─────┬──────┘          │
+     │                │                 │
+     │          ┌─────▼──────┐          │
+     │          │ Finalized  │          │
+     │          │ (commit)   │──────────┤
+     │          └─────┬──────┘          │
+     │                │                 │
+     │          ┌─────▼──────┐   ┌─────▼──────┐
+     │          │  Verified  │   │  Rejected  │
+     │          │ (terminal) │   │ (terminal) │
+     │          └────────────┘   └────────────┘
+     │                                ▲
+     └────────────────────────────────┘
+           (rejected from any stage)
 ```
 
 ### Stage Semantics
@@ -279,19 +280,19 @@ The gateway broadcasts to potentially hundreds of clients. A single slow consume
 ## The Solution: Bounded Channel + Drop + Disconnect
 
 ```
-                    ┌─────────────────────────────────┐
-  Broadcast ──────▶ │  Per-client bounded channel      │ ──────▶ WebSocket send
-                    │  capacity: 4,096 messages        │
-                    └─────────────────────────────────┘
-                              │
-                              │ (channel full)
-                              ▼
-                    ┌─────────────────────────────────┐
-                    │  DROP message + increment counter │
-                    │                                   │
-                    │  Every 1,000 drops: log warning   │
-                    │  After 10,000 drops: DISCONNECT   │
-                    └─────────────────────────────────┘
+                 ┌──────────────────────────────────┐
+Broadcast ──────►│  Per-client bounded channel       │──────► WebSocket send
+                 │  capacity: 4,096 messages         │
+                 └──────────────┬───────────────────┘
+                                │
+                                │ (channel full)
+                                ▼
+                 ┌──────────────────────────────────┐
+                 │  DROP message + increment counter │
+                 │                                   │
+                 │  Every 1,000 drops: log warning   │
+                 │  After 10,000 drops: DISCONNECT   │
+                 └──────────────────────────────────┘
 ```
 
 ### Constants
@@ -326,7 +327,48 @@ client.on("events", (events) => {
 
 ---
 
+# Connection Lifecycle
+
+## Hello Handshake
+
+On every WebSocket connect, the server sends a `Hello` control message as the **first frame**:
+
+```json
+{
+  "server_seqno": 0,
+  "Hello": {
+    "wire_version": 1,
+    "server_version": "0.1.0",
+    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter"],
+    "limits": {
+      "resume_buffer_size": 100000,
+      "client_send_buffer": 4096,
+      "slow_client_drop_limit": 10000,
+      "heartbeat_interval_secs": 30,
+      "heartbeat_timeout_secs": 60
+    }
+  }
+}
+```
+
+This is a one-way declaration. No negotiation. Client response is optional and purely informational.
+
+## Heartbeat
+
+The server sends WebSocket Ping frames at a configurable interval (default: 30s). If no activity is received from the client within the liveness timeout (default: 60s), the connection is closed.
+
+Both values are configurable via CLI:
+
+```bash
+gateway --heartbeat-interval 30 --heartbeat-timeout 90
+```
+
+---
+
 # SLA Expectations
+
+> Observed baselines on AMD EPYC 9004, 32 GB RAM, NVMe, co-located with validator.
+> See [SLO Definitions](slo.md) for full details with Prometheus queries.
 
 ## Availability
 
@@ -338,20 +380,21 @@ client.on("events", (events) => {
 
 ## Latency
 
-| Metric | Typical | Maximum |
-|--------|---------|---------|
-| Event ring → first client | < 1ms | 5ms |
-| Proposed → Voted | ~400ms | Block-dependent |
-| Proposed → Finalized | ~800ms | Block-dependent |
-| Resume replay (100K messages) | < 100ms | 500ms |
+| Metric | Observed | Notes |
+|--------|----------|-------|
+| Event ring -> first client (p99) | < 5 ms | Co-located, mmap'd hugepages |
+| Proposed -> Finalized (p50) | ~600 ms | Network property, not gateway |
+| WebSocket send (p99) | < 2 ms | Localhost clients |
+| Resume replay (100K entries) | < 500 ms | Pre-serialized JSON, zero re-serialization |
 
 ## Throughput
 
-| Metric | Value |
-|--------|-------|
-| Max events/second | ~50,000+ (event ring throughput) |
-| Max concurrent WebSocket clients | Limited by system resources (no per-IP limits) |
-| Broadcast fan-out | O(n) clients, non-blocking per client |
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Sustained event processing | > 50,000 events/s | Synthetic benchmark, co-located |
+| Processing without drops | > 10,000 events/s with 50 clients | Realistic mixed workload |
+| Max concurrent WebSocket clients | > 500 | System-resource limited, no per-IP limits |
+| Broadcast fan-out | O(1) per client | Non-blocking, bounded channel |
 
 ## Guarantees
 
