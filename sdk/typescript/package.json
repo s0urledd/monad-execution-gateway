@@ -1,5 +1,5 @@
 {
-  "name": "@monad-labs/execution-events",
+  "name": "monad-execution-events",
   "version": "0.1.0",
   "description": "TypeScript SDK for Monad Execution Events Gateway",
   "main": "dist/index.js",
