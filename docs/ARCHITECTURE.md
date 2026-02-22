@@ -6,7 +6,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Monad Full Node                          │
 │                                                                 │
-│  ┌──────────────┐     mmap (hugepages)     ┌─────────────────┐ │
+│  ┌──────────────┐     mmap (hugepages)     ┌─────────────────┐  │
 │  │  Execution    │ ───────────────────────► │  Event Ring     │ │
 │  │  Engine (EVM) │    zero-copy writes      │  (shared memory)│ │
 │  └──────────────┘                           └────────┬────────┘ │
@@ -16,19 +16,19 @@
                   ┌────────────────────────────────────▼──────────┐
                   │           Execution Events Gateway            │
                   │                                               │
-                  │  ┌──────────────┐   ┌──────────────────────┐ │
-                  │  │ Event        │   │ Broadcast            │ │
-                  │  │ Listener     ├──►│ Channel (1M cap)     │ │
-                  │  │ (ring reader)│   │ (fan-out to clients) │ │
-                  │  └──────────────┘   └──────────┬───────────┘ │
+                  │  ┌──────────────┐   ┌──────────────────────┐  │
+                  │  │ Event        │   │ Broadcast            │  │
+                  │  │ Listener     ├──►│ Channel (1M cap)     │  │
+                  │  │ (ring reader)│   │ (fan-out to clients) │  │
+                  │  └──────────────┘   └──────────┬───────────┘  │
                   │                                │              │
                   │  ┌─────────────────────────────▼───────────┐ │
-                  │  │          Per-Client Pipeline             │ │
+                  │  │          Per-Client Pipeline            │ │
                   │  │                                         │ │
                   │  │  subscription filter ─► backpressure    │ │
                   │  │  ─► bounded channel ─► WebSocket send   │ │
                   │  └─────────────────────────────────────────┘ │
-                  │                                               │
+                  │                                              │
                   │  ┌────────────────────┐ ┌──────────────────┐ │
                   │  │ Resume Ring Buffer │ │ REST API         │ │
                   │  │ (100K pre-serial.  │ │ /v1/tps          │ │
