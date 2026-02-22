@@ -130,23 +130,23 @@ struct WsQuery {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 pub struct GatewayState {
-    pub event_broadcast: broadcast::Sender<SequencedItem>,
-    pub tps: watch::Receiver<usize>,
-    pub contention: watch::Receiver<Option<ContentionData>>,
+    pub(crate) event_broadcast: broadcast::Sender<SequencedItem>,
+    pub(crate) tps: watch::Receiver<usize>,
+    pub(crate) contention: watch::Receiver<Option<ContentionData>>,
     pub block_number: AtomicU64,
     pub connected_clients: AtomicUsize,
     pub start_time: Instant,
     pub last_event_time: AtomicU64,
-    pub base_filter: EventFilter,
-    pub lifecycle_tracker: RwLock<BlockLifecycleTracker>,
+    pub(crate) base_filter: EventFilter,
+    pub(crate) lifecycle_tracker: RwLock<BlockLifecycleTracker>,
     /// Monotonic counter for server-level message sequencing.
     pub server_seqno: AtomicU64,
     /// Ring buffer of pre-serialized wire messages for zero-cost cursor-resume.
-    pub event_history: Mutex<VecDeque<ReplayEntry>>,
+    pub(crate) event_history: Mutex<VecDeque<ReplayEntry>>,
     /// Per-IP active connection counter for rate limiting.
     ip_connections: Mutex<HashMap<IpAddr, usize>>,
     /// Shutdown signal for graceful termination.
-    pub shutdown: watch::Receiver<()>,
+    pub(crate) shutdown: watch::Receiver<()>,
 }
 
 impl GatewayState {
