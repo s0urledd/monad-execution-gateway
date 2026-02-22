@@ -118,6 +118,7 @@ Emitted when transaction execution begins. Contains the full transaction header.
 | `txn_hash` | string | Transaction hash |
 | `sender` | string | Sender address |
 | `txn_type` | number | EIP-2718 transaction type (0=legacy, 2=EIP-1559) |
+| `chain_id` | string | Chain ID (hex U256) |
 | `nonce` | number | Sender nonce |
 | `gas_limit` | number | Gas limit |
 | `max_fee_per_gas` | string | Max fee per gas (hex U256) |
@@ -126,6 +127,34 @@ Emitted when transaction execution begins. Contains the full transaction header.
 | `data` | string | Calldata (hex bytes) |
 | `to` | string | Recipient address |
 | `is_contract_creation` | boolean | Whether this creates a contract |
+| `r` | string | ECDSA signature r (hex U256) |
+| `s` | string | ECDSA signature s (hex U256) |
+| `y_parity` | boolean | Signature y-parity |
+| `access_list_count` | number | Number of EIP-2930 access list entries |
+| `auth_list_count` | number | Number of EIP-7702 auth list entries |
+
+### `TxnAccessListEntry`
+
+Emitted for each EIP-2930 access list entry attached to a transaction. Follows `TxnHeaderStart`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `txn_index` | number | Transaction index |
+| `address` | string | Address in the access list |
+| `storage_keys` | string | Concatenated 32-byte storage keys (hex bytes) |
+
+### `TxnAuthListEntry`
+
+Emitted for each EIP-7702 authorization list entry attached to a transaction.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `txn_index` | number | Transaction index |
+| `address` | string | Authorized address |
+
+### `TxnHeaderEnd`
+
+Marks the end of transaction header processing (after all access list and auth list entries). No payload fields.
 
 ### `TxnEvmOutput`
 
@@ -163,6 +192,10 @@ Internal call within a transaction (CALL, DELEGATECALL, STATICCALL, CREATE).
 | `value` | string | Value transferred (hex U256) |
 | `input` | string | Call input data (hex) |
 | `output` | string | Call return data (hex) |
+
+### `NativeTransfer`
+
+Virtual event — not emitted directly by the event ring. Used as a **subscription filter alias**: subscribing to `NativeTransfer` matches `TxnCallFrame` events where `value > 0`. Useful for tracking ETH transfers without processing all call frames.
 
 ### `TxnEnd`
 

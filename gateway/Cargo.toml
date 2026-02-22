@@ -2,7 +2,7 @@
 name = "execution-events-gateway"
 version = "0.1.0"
 edition = "2021"
-description = "Community-maintained public Execution Events Gateway for Monad builders"
+description = "Real-time execution event streaming gateway for Monad full nodes"
 license = "MIT"
 
 [dependencies]
