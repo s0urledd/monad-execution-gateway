@@ -76,3 +76,34 @@ jobs:
         working-directory: webhook-relay
       - run: npx tsc --noEmit
         working-directory: webhook-relay
+
+  sdk-python:
+    name: Python SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+        working-directory: sdk/python
+      - name: Ruff lint
+        run: ruff check monad_execution_events/
+        working-directory: sdk/python
+      - name: Ruff format check
+        run: ruff format --check monad_execution_events/
+        working-directory: sdk/python
+      - name: Mypy type check
+        run: mypy monad_execution_events/ --ignore-missing-imports
+        working-directory: sdk/python
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build gateway image
+        run: docker build -t monad-gateway:ci ./gateway
+      - name: Build webhook-relay image
+        run: docker build -t monad-webhook-relay:ci ./webhook-relay
