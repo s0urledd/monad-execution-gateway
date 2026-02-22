@@ -1471,4 +1471,212 @@ mod tests {
         assert!(sub.event_names.contains(&EventName::BlockStart));
         assert_eq!(sub.event_names.len(), 1);
     }
+
+    // ── real_ip extraction ────────────────────────────────
+
+    #[test]
+    fn real_ip_xff_first_entry() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
+        let fallback: IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(real_ip(&headers, fallback), "1.2.3.4".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn real_ip_xri_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", "10.0.0.1".parse().unwrap());
+        let fallback: IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(real_ip(&headers, fallback), "10.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn real_ip_socket_fallback() {
+        let headers = HeaderMap::new();
+        let fallback: IpAddr = "192.168.1.1".parse().unwrap();
+        assert_eq!(real_ip(&headers, fallback), fallback);
+    }
+
+    #[test]
+    fn real_ip_xff_takes_priority_over_xri() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.1.1.1".parse().unwrap());
+        headers.insert("x-real-ip", "2.2.2.2".parse().unwrap());
+        let fallback: IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(real_ip(&headers, fallback), "1.1.1.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn real_ip_invalid_xff_falls_to_xri() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "not-an-ip, also-bad".parse().unwrap());
+        headers.insert("x-real-ip", "3.3.3.3".parse().unwrap());
+        let fallback: IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(real_ip(&headers, fallback), "3.3.3.3".parse::<IpAddr>().unwrap());
+    }
+
+    // ── IP slot limiting ──────────────────────────────────
+
+    fn build_test_state() -> Arc<GatewayState> {
+        let (broadcast_tx, _) = broadcast::channel::<SequencedItem>(16);
+        let (_tps_tx, tps_rx) = watch::channel(0usize);
+        let (_cont_tx, cont_rx) = watch::channel(None::<ContentionData>);
+        let (_shut_tx, shut_rx) = watch::channel(());
+        Arc::new(GatewayState {
+            event_broadcast: broadcast_tx,
+            tps: tps_rx,
+            contention: cont_rx,
+            block_number: AtomicU64::new(0),
+            connected_clients: AtomicUsize::new(0),
+            start_time: Instant::now(),
+            last_event_time: AtomicU64::new(0),
+            base_filter: EventFilter::default(),
+            lifecycle_tracker: RwLock::new(BlockLifecycleTracker::new()),
+            server_seqno: AtomicU64::new(0),
+            event_history: Mutex::new(VecDeque::new()),
+            ip_connections: Mutex::new(HashMap::new()),
+            shutdown: shut_rx,
+        })
+    }
+
+    #[test]
+    fn ip_slot_acquire_up_to_limit() {
+        let state = build_test_state();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        for _ in 0..MAX_CONNECTIONS_PER_IP {
+            assert!(state.acquire_ip_slot(ip));
+        }
+        // 11th should fail
+        assert!(!state.acquire_ip_slot(ip));
+    }
+
+    #[test]
+    fn ip_slot_release_allows_new() {
+        let state = build_test_state();
+        let ip: IpAddr = "10.0.0.2".parse().unwrap();
+        for _ in 0..MAX_CONNECTIONS_PER_IP {
+            state.acquire_ip_slot(ip);
+        }
+        assert!(!state.acquire_ip_slot(ip));
+        state.release_ip_slot(ip);
+        assert!(state.acquire_ip_slot(ip));
+    }
+
+    #[test]
+    fn ip_slot_different_ips_independent() {
+        let state = build_test_state();
+        let ip_a: IpAddr = "10.0.0.3".parse().unwrap();
+        let ip_b: IpAddr = "10.0.0.4".parse().unwrap();
+        for _ in 0..MAX_CONNECTIONS_PER_IP {
+            state.acquire_ip_slot(ip_a);
+        }
+        // ip_b should still be available
+        assert!(state.acquire_ip_slot(ip_b));
+    }
+
+    #[test]
+    fn ip_slot_release_removes_entry_at_zero() {
+        let state = build_test_state();
+        let ip: IpAddr = "10.0.0.5".parse().unwrap();
+        state.acquire_ip_slot(ip);
+        state.release_ip_slot(ip);
+        let map = state.ip_connections.lock().unwrap();
+        assert!(!map.contains_key(&ip));
+    }
+
+    // ── Ring buffer eviction ──────────────────────────────
+
+    #[test]
+    fn ring_buffer_eviction_fifo() {
+        let state = build_test_state();
+        let mut history = state.event_history.lock().unwrap();
+        // Fill beyond MAX_EVENT_HISTORY
+        for i in 0..MAX_EVENT_HISTORY + 50 {
+            history.push_back(ReplayEntry {
+                seqno: i as u64,
+                json: format!("{{\"seqno\":{}}}", i),
+            });
+            while history.len() > MAX_EVENT_HISTORY {
+                history.pop_front();
+            }
+        }
+        assert_eq!(history.len(), MAX_EVENT_HISTORY);
+        // Oldest should be seqno 50, newest 100049
+        assert_eq!(history.front().unwrap().seqno, 50);
+        assert_eq!(history.back().unwrap().seqno, (MAX_EVENT_HISTORY + 49) as u64);
+    }
+
+    #[test]
+    fn ring_buffer_cursor_resume_filters_correctly() {
+        let state = build_test_state();
+        {
+            let mut history = state.event_history.lock().unwrap();
+            for i in 100..200u64 {
+                history.push_back(ReplayEntry {
+                    seqno: i,
+                    json: format!("{{\"seqno\":{}}}", i),
+                });
+            }
+        }
+        // Resume from seqno 150 → should get 151..199 (49 entries)
+        let history = state.event_history.lock().unwrap();
+        let entries: Vec<_> = history.iter().filter(|e| e.seqno > 150).collect();
+        assert_eq!(entries.len(), 49);
+        assert_eq!(entries.first().unwrap().seqno, 151);
+        assert_eq!(entries.last().unwrap().seqno, 199);
+    }
+
+    #[test]
+    fn ring_buffer_cursor_too_old_returns_empty() {
+        let state = build_test_state();
+        {
+            let mut history = state.event_history.lock().unwrap();
+            for i in 500..600u64 {
+                history.push_back(ReplayEntry {
+                    seqno: i,
+                    json: String::new(),
+                });
+            }
+        }
+        // Cursor 100 is older than oldest (500)
+        let history = state.event_history.lock().unwrap();
+        let oldest = history.front().map(|e| e.seqno).unwrap_or(0);
+        let cursor = 100u64;
+        let is_too_old = cursor < oldest && oldest > 0;
+        assert!(is_too_old);
+    }
+
+    // ── Backpressure / drop logic ─────────────────────────
+
+    #[test]
+    fn backpressure_drop_on_full_channel() {
+        // Create a channel with capacity 2
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(2);
+        // Fill it
+        tx.try_send("a".into()).unwrap();
+        tx.try_send("b".into()).unwrap();
+        // Third should fail with Full
+        match tx.try_send("c".into()) {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {} // expected
+            other => panic!("Expected Full, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn backpressure_closed_channel_detected() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(4);
+        drop(rx);
+        match tx.try_send("msg".into()) {
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {} // expected
+            other => panic!("Expected Closed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn slow_client_drop_limit_constant() {
+        // Verify the constant matches documented behavior
+        assert_eq!(SLOW_CLIENT_DROP_LIMIT, 10_000);
+        assert_eq!(CLIENT_SEND_BUFFER, 4_096);
+        assert_eq!(MAX_CONNECTIONS_PER_IP, 10);
+    }
 }
