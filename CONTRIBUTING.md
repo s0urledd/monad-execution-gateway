@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in the Monad Execution Events Gateway! This project is community-maintained and contributions are welcome.
+Thanks for your interest in the Monad Execution Events Gateway! This project is maintained by Huginn Tech and contributions are welcome.
 
 ## Getting Started
 
@@ -14,6 +14,8 @@ Thanks for your interest in the Monad Execution Events Gateway! This project is 
 ```
 gateway/          Rust gateway server (event listener, WebSocket, REST)
 sdk/typescript/   TypeScript client SDK
+sdk/python/       Python client SDK
+webhook-relay/    Webhook relay sidecar (Node.js)
 docs/             API, events, and deployment documentation
 examples/         Usage examples
 ```
