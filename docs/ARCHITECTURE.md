@@ -350,7 +350,7 @@ client.on("events", (events) => {
 | Metric | Value |
 |--------|-------|
 | Max events/second | ~50,000+ (event ring throughput) |
-| Max concurrent WebSocket clients | Limited by `MAX_CONNECTIONS_PER_IP` (10/IP) and system resources |
+| Max concurrent WebSocket clients | Limited by system resources (no per-IP limits) |
 | Broadcast fan-out | O(n) clients, non-blocking per client |
 
 ## Guarantees

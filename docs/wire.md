@@ -50,7 +50,7 @@ Every server-to-client message is a JSON object with exactly two top-level keys:
 
 ### 3.1 `Hello`
 
-Sent as the **first frame** on every connection. Declares server capabilities.
+Sent as the **first frame** on every connection. Declares server identity, features, and operational limits. This is a one-way declaration — no negotiation. Client response is optional and informational only.
 
 ```json
 {
@@ -58,7 +58,14 @@ Sent as the **first frame** on every connection. Declares server capabilities.
   "Hello": {
     "wire_version": 1,
     "server_version": "0.1.0",
-    "capabilities": ["lifecycle", "contention", "resume", "heartbeat"]
+    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter"],
+    "limits": {
+      "resume_buffer_size": 100000,
+      "client_send_buffer": 4096,
+      "slow_client_drop_limit": 10000,
+      "heartbeat_interval_secs": 30,
+      "heartbeat_timeout_secs": 60
+    }
   }
 }
 ```
@@ -67,7 +74,18 @@ Sent as the **first frame** on every connection. Declares server capabilities.
 |-------|------|-------------|
 | `wire_version` | `u32` | Protocol version. Incremented on breaking changes. |
 | `server_version` | `string` | Gateway software version (semver). |
-| `capabilities` | `string[]` | Feature flags the server supports. |
+| `features` | `string[]` | Feature flags the server supports. |
+| `limits` | `object` | Server operational limits (see below). |
+
+**`limits` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `resume_buffer_size` | `usize` | Number of entries in the resume ring buffer. |
+| `client_send_buffer` | `usize` | Per-client outbound channel capacity. |
+| `slow_client_drop_limit` | `u64` | Cumulative drops before server disconnects the client. |
+| `heartbeat_interval_secs` | `u64` | Seconds between server Ping frames. |
+| `heartbeat_timeout_secs` | `u64` | Seconds without client activity before disconnect. |
 
 ### 3.2 `Resume`
 
@@ -355,7 +373,7 @@ Client                                          Server
   │  WebSocket upgrade (?resume_from=N)           │
   ├──────────────────────────────────────────────►│
   │                                               │
-  │  Hello {wire_version, capabilities}           │
+  │  Hello {wire_version, features, limits}        │
   │◄──────────────────────────────────────────────┤  frame 1
   │                                               │
   │  Resume {mode}                                │
@@ -368,7 +386,7 @@ Client                                          Server
   │◄──────────────────────────────────────────────┤  ongoing
   │                                               │
   │  Subscribe {events, filters}                  │
-  ├──────────────────────────────────────────────►│  (optional, up to 5x)
+  ├──────────────────────────────────────────────►│  (optional, unlimited)
   │                                               │
   │  Ping                                         │
   │◄──────────────────────────────────────────────┤  every 30s
@@ -383,8 +401,6 @@ Client                                          Server
 
 | Error | Server Behavior |
 |-------|-----------------|
-| Per-IP limit exceeded | HTTP 429 (no WebSocket upgrade) |
-| Subscribe limit exceeded | Message silently ignored |
 | Slow client (10K drops) | Server closes connection |
 | Client Pong timeout | Server closes connection |
 | Invalid JSON from client | Message ignored |

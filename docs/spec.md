@@ -131,11 +131,7 @@ Each channel has a default subscription applied on connect:
 
 ### 3.2 Subscribe Protocol
 
-Clients may send a JSON text frame to update their subscription. Each subscribe message **replaces** the current subscription entirely.
-
-**Limits:**
-- Maximum **5** unique subscribe updates per connection (identical subscriptions don't count).
-- Exceeding the limit: server ignores the message and increments `ws_rejected_sub_limit_total`.
+Clients may send a JSON text frame to update their subscription. Each subscribe message **replaces** the current subscription entirely. Identical subscriptions (same as current) are silently ignored.
 
 ### 3.3 Filter Evaluation Order
 
@@ -228,30 +224,9 @@ On gateway restart:
 
 ---
 
-## 6. Connection Limits
+## 6. Abuse Protection
 
-### 6.1 Per-IP Rate Limiting
-
-| Parameter | Value |
-|-----------|-------|
-| Max connections per IP | 10 |
-| Enforcement | On WebSocket upgrade |
-| Response on rejection | HTTP 429 Too Many Requests |
-| Metric | `ws_rejected_ip_limit_total` |
-
-### 6.2 Slot Lifecycle
-
-- **Acquire**: On successful WebSocket upgrade.
-- **Release**: On WebSocket disconnect (normal close, error, or forced disconnect).
-- **Tracking**: `HashMap<IpAddr, usize>` protected by `Mutex`.
-- **Cleanup**: Entry removed from map when count reaches 0.
-
-### 6.3 IP Resolution
-
-The real client IP is resolved in this priority order:
-1. `X-Forwarded-For` header (first IP in the comma-separated list)
-2. `X-Real-IP` header
-3. Socket address (ConnectInfo)
+The gateway does **not** enforce public abuse limits. It is designed to run in trusted or operator-controlled environments. Deployment-level protections (reverse proxy, firewall, auth) are out of scope.
 
 ---
 
@@ -320,21 +295,37 @@ Clients may send Ping frames at any time. The server responds with Pong (handled
 
 ### 10.1 Protocol
 
-On WebSocket connect, the server sends a `Hello` control message as the **first frame** (before `Resume`):
+On WebSocket connect, the server sends a `Hello` control message as the **first frame** (before `Resume`). This is a one-way declaration — no negotiation.
 
 ```json
-{"server_seqno": 0, "Hello": {"wire_version": 1, "server_version": "0.1.0", "capabilities": ["lifecycle", "contention", "resume", "heartbeat"]}}
+{
+  "server_seqno": 0,
+  "Hello": {
+    "wire_version": 1,
+    "server_version": "0.1.0",
+    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter"],
+    "limits": {
+      "resume_buffer_size": 100000,
+      "client_send_buffer": 4096,
+      "slow_client_drop_limit": 10000,
+      "heartbeat_interval_secs": 30,
+      "heartbeat_timeout_secs": 60
+    }
+  }
+}
 ```
+
+The `features` array lists server capabilities. The `limits` object exposes operational parameters so clients can tune their behavior (e.g., reconnect strategy based on `resume_buffer_size`).
 
 ### 10.2 Client Response (Optional)
 
-Clients may send a `Hello` message to declare their capabilities:
+Clients may send a `Hello` message to identify themselves. This is purely informational — the server logs it but takes no action. If the client never sends a Hello, nothing changes.
 
 ```json
 {"hello": {"wire_version": 1, "client_name": "my-bot", "client_version": "1.0.0"}}
 ```
 
-### 10.3 Version Negotiation
+### 10.3 Version Mismatch
 
 - The server declares the wire protocol version it speaks.
 - If the client sends a `hello` with a different `wire_version`, the server logs the mismatch but continues (forward-compatible).

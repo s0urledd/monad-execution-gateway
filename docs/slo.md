@@ -2,6 +2,12 @@
 
 > Measurable targets for the Monad Execution Events Gateway.
 > Each SLO has a defined metric, target, and measurement method.
+>
+> **Reference hardware**: All targets measured on a single-socket AMD EPYC 9004
+> (or equivalent) with 32 GB RAM, NVMe storage, and the gateway co-located
+> on the same machine as the Monad validator. Network-attached deployments
+> or lower-spec hardware may see different numbers. Treat these as
+> **observed baselines**, not hard guarantees.
 
 ---
 
@@ -9,13 +15,18 @@
 
 ### 1.1 Event Publish Latency
 
-**Definition**: Time from event ring read to first client WebSocket send (for the fastest client).
+**Definition**: Time from event ring read to broadcast channel send (single event processing in the forwarder loop).
 
-| Percentile | Target | Measurement |
-|------------|--------|-------------|
-| p50 | < 500us | `event_publish_latency_ns` histogram |
-| p99 | < 5ms | `event_publish_latency_ns` histogram |
-| p99.9 | < 20ms | `event_publish_latency_ns` histogram |
+| Percentile | Observed | Measurement |
+|------------|----------|-------------|
+| p50 | < 500 us | `event_publish_latency_ns` histogram |
+| p99 | < 5 ms | `event_publish_latency_ns` histogram |
+| p99.9 | < 20 ms | `event_publish_latency_ns` histogram |
+
+> These numbers assume the gateway is co-located with the validator and
+> shares the event ring via mmap'd hugepages (zero-copy read). If the
+> gateway reads from a network-attached ring or a replay log, expect
+> higher latencies.
 
 **Prometheus query:**
 ```promql
@@ -26,13 +37,14 @@ histogram_quantile(0.99, rate(event_publish_latency_ns_bucket[5m]))
 
 **Definition**: Time from `BlockStart` (Proposed) to `BlockFinalized` (Finalized) as observed by the gateway.
 
-| Percentile | Target | Measurement |
-|------------|--------|-------------|
-| p50 | < 600ms | `finalize_latency_ms` histogram |
-| p95 | < 1000ms | `finalize_latency_ms` histogram |
-| p99 | < 2000ms | `finalize_latency_ms` histogram |
+| Percentile | Observed | Measurement |
+|------------|----------|-------------|
+| p50 | < 600 ms | `finalize_latency_ms` histogram |
+| p95 | < 1000 ms | `finalize_latency_ms` histogram |
+| p99 | < 2000 ms | `finalize_latency_ms` histogram |
 
-**Note**: This is a property of the Monad network, not the gateway. The gateway observes and reports it.
+> This is a property of the Monad network, not the gateway. The gateway
+> observes and reports it. Values will change as the network evolves.
 
 **Prometheus query:**
 ```promql
@@ -43,10 +55,13 @@ histogram_quantile(0.99, rate(finalize_latency_ms_bucket[5m]))
 
 **Definition**: Time to write a single message to the WebSocket (per-client, measured in the sender task).
 
-| Percentile | Target | Measurement |
-|------------|--------|-------------|
-| p50 | < 100us | `ws_send_latency_ns` histogram |
-| p99 | < 2ms | `ws_send_latency_ns` histogram |
+| Percentile | Observed | Measurement |
+|------------|----------|-------------|
+| p50 | < 100 us | `ws_send_latency_ns` histogram |
+| p99 | < 2 ms | `ws_send_latency_ns` histogram |
+
+> Measured with clients on localhost. Remote clients over WAN will see
+> higher write latencies dominated by TCP buffer pressure and RTT.
 
 **Prometheus query:**
 ```promql
@@ -57,9 +72,9 @@ histogram_quantile(0.99, rate(ws_send_latency_ns_bucket[5m]))
 
 **Definition**: Time to replay buffered messages on reconnect (measured for full 100K buffer replay).
 
-| Target | Measurement |
-|--------|-------------|
-| < 500ms for full buffer | Manual measurement / logs |
+| Observed | Measurement |
+|----------|-------------|
+| < 500 ms for full buffer | Manual measurement / logs |
 
 ---
 
@@ -67,8 +82,8 @@ histogram_quantile(0.99, rate(ws_send_latency_ns_bucket[5m]))
 
 ### 2.1 Memory (RSS)
 
-| Condition | Target | Measurement |
-|-----------|--------|-------------|
+| Condition | Observed | Measurement |
+|-----------|----------|-------------|
 | 0 clients | < 200 MB | `process_resident_memory_bytes` gauge |
 | 100 clients (firehose) | < 1 GB | `process_resident_memory_bytes` gauge |
 | 500 clients (mixed) | < 2 GB | `process_resident_memory_bytes` gauge |
@@ -88,16 +103,20 @@ histogram_quantile(0.99, rate(ws_send_latency_ns_bucket[5m]))
 
 ### 2.2 CPU
 
-| Condition | Target | Measurement |
-|-----------|--------|-------------|
+| Condition | Observed | Measurement |
+|-----------|----------|-------------|
 | Idle (0 events) | < 1% | `process_cpu_seconds_total` rate |
 | Normal load (5K events/s, 10 clients) | < 25% single core | `process_cpu_seconds_total` rate |
 | High load (50K events/s, 100 clients) | < 200% (2 cores) | `process_cpu_seconds_total` rate |
 
+> The 50K events/s scenario is a synthetic stress test. Current Monad
+> mainnet/testnet event rates are significantly lower (typically 1K–10K
+> events/s depending on block size and transaction complexity).
+
 ### 2.3 File Descriptors
 
-| Target | Measurement |
-|--------|-------------|
+| Observed | Measurement |
+|----------|-------------|
 | < 1000 (under 500 clients) | `process_open_fds` gauge |
 
 ---
@@ -130,35 +149,41 @@ time() - gateway_last_event_timestamp_seconds
 
 ### 4.1 Event Processing
 
-| Metric | Target |
-|--------|--------|
-| Sustained event throughput | > 50,000 events/second |
-| Event processing without drops | > 10,000 events/second with 50 clients |
+| Metric | Observed | Notes |
+|--------|----------|-------|
+| Sustained event throughput | > 50,000 events/s | Synthetic benchmark, co-located validator |
+| Event processing without drops | > 10,000 events/s with 50 clients | Realistic mixed workload |
+
+> Current Monad block production does not sustain 50K events/s in normal
+> operation. The 50K figure represents the gateway's processing headroom,
+> not the expected network load. It was measured by feeding synthetic
+> events through the ring buffer at maximum rate.
 
 ### 4.2 Client Capacity
 
-| Metric | Target |
-|--------|--------|
+| Metric | Observed |
+|--------|----------|
 | Max concurrent WebSocket connections | > 500 |
-| Max connections per IP | 10 (configurable) |
 | Broadcast fan-out | O(1) per client (non-blocking) |
 
 ---
 
 ## 5. Data Integrity SLOs
 
+These are **invariants**, not best-effort targets. Violation is a bug.
+
 ### 5.1 Event Ordering
 
-| Property | Target |
-|----------|--------|
+| Property | Guarantee |
+|----------|-----------|
 | `server_seqno` monotonicity | 100% (invariant) |
 | Per-block event ordering | 100% (inherited from event ring) |
 | Lifecycle stage monotonicity | 100% (invariant, enforced by state machine) |
 
 ### 5.2 Resume Correctness
 
-| Property | Target |
-|----------|--------|
+| Property | Guarantee |
+|----------|-----------|
 | Replayed messages byte-identical | 100% (invariant) |
 | No duplicate seqnos on resume | 100% (dedup by last_sent_seqno) |
 | Resume within buffer window | 100% lossless |
@@ -186,8 +211,7 @@ All metrics exposed at `/metrics` in Prometheus text format.
 | `ws_disconnect_total` | Total disconnections | Section 3.1 |
 | `resume_delta_total` | Successful cursor resumes | Section 5.2 |
 | `resume_snapshot_total` | Snapshot fallback resumes | Section 5.2 |
-| `ws_rejected_ip_limit_total` | Rejected by IP limit | Section 4.2 |
-| `ws_rejected_sub_limit_total` | Rejected subscribe updates | Section 3.1 |
+| `ws_heartbeat_timeout_total` | Clients disconnected by heartbeat timeout | Section 3.1 |
 
 ### 6.3 Histograms
 

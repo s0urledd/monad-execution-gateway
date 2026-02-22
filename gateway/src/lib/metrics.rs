@@ -80,20 +80,6 @@ lazy_static! {
     ))
     .unwrap();
 
-    /// Connections rejected due to per-IP limit.
-    pub static ref WS_REJECTED_IP_LIMIT: Counter = register_counter!(opts!(
-        "ws_rejected_ip_limit_total",
-        "WebSocket connections rejected due to per-IP connection limit"
-    ))
-    .unwrap();
-
-    /// Subscribe messages rejected due to per-client subscription limit.
-    pub static ref WS_REJECTED_SUB_LIMIT: Counter = register_counter!(opts!(
-        "ws_rejected_sub_limit_total",
-        "Subscribe requests rejected due to per-client subscription limit"
-    ))
-    .unwrap();
-
     // ── SLO-tied latency histograms ──────────────────────────────────
 
     /// Event publish latency in nanoseconds: time from event ring read to
