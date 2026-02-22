@@ -634,4 +634,189 @@ mod tests {
         assert_eq!(update.from_stage, Some(BlockStage::Proposed));
         assert_eq!(update.to_stage, BlockStage::Finalized);
     }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // Property / Invariant Tests (spec compliance)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    #[test]
+    fn property_stage_monotonic_never_decreases() {
+        // Exhaustively verify that all forward transitions succeed
+        // and all backward transitions fail
+        let stages = [
+            BlockStage::Proposed,
+            BlockStage::Voted,
+            BlockStage::Finalized,
+            BlockStage::Verified,
+        ];
+        for (i, &from) in stages.iter().enumerate() {
+            for (j, &to) in stages.iter().enumerate() {
+                let result = from.can_transition_to(to);
+                if j > i {
+                    assert!(result, "{:?} → {:?} should succeed", from, to);
+                } else {
+                    assert!(!result, "{:?} → {:?} should fail (backward)", from, to);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn property_rejected_always_valid() {
+        // Rejected must be valid from every non-terminal stage
+        let stages = [
+            BlockStage::Proposed,
+            BlockStage::Voted,
+            BlockStage::Finalized,
+        ];
+        for &stage in &stages {
+            assert!(
+                stage.can_transition_to(BlockStage::Rejected),
+                "{:?} → Rejected should always succeed",
+                stage
+            );
+        }
+    }
+
+    #[test]
+    fn property_terminal_states_are_final() {
+        assert!(BlockStage::Verified.is_terminal());
+        assert!(BlockStage::Rejected.is_terminal());
+        assert!(!BlockStage::Proposed.is_terminal());
+        assert!(!BlockStage::Voted.is_terminal());
+        assert!(!BlockStage::Finalized.is_terminal());
+
+        // Verified cannot go to non-Rejected stages
+        assert!(!BlockStage::Verified.can_transition_to(BlockStage::Proposed));
+        assert!(!BlockStage::Verified.can_transition_to(BlockStage::Voted));
+        assert!(!BlockStage::Verified.can_transition_to(BlockStage::Finalized));
+    }
+
+    #[test]
+    fn property_lifecycle_stage_never_goes_backward() {
+        // Simulate many blocks going through full lifecycle
+        let mut tracker = BlockLifecycleTracker::new();
+
+        for i in 0u8..50 {
+            let hash = test_hash(100 + i);
+            let block_num = 1000 + i as u64;
+            tracker.on_block_proposed(hash, block_num, 0);
+
+            let stages = [
+                BlockStage::Voted,
+                BlockStage::Finalized,
+                BlockStage::Verified,
+            ];
+            let mut current = BlockStage::Proposed;
+
+            for &next_stage in &stages {
+                let update = tracker.advance_stage(
+                    hash,
+                    block_num,
+                    next_stage,
+                    (next_stage as u64 + 1) * 100_000_000,
+                );
+                if let Some(u) = update {
+                    assert!(
+                        u.to_stage > current,
+                        "stage went backward: {:?} → {:?}",
+                        current,
+                        u.to_stage
+                    );
+                    current = u.to_stage;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn property_double_advance_to_same_stage_rejected() {
+        let mut tracker = BlockLifecycleTracker::new();
+        let hash = test_hash(77);
+        tracker.on_block_proposed(hash, 7700, 0);
+        tracker
+            .advance_stage(hash, 7700, BlockStage::Voted, 100_000_000)
+            .unwrap();
+
+        // Try Voted again — should be rejected
+        let result = tracker.advance_stage(hash, 7700, BlockStage::Voted, 200_000_000);
+        assert!(result.is_none(), "duplicate stage advance should be rejected");
+    }
+
+    #[test]
+    fn property_completed_blocks_eviction_preserves_recent() {
+        let mut tracker = BlockLifecycleTracker::new();
+        tracker.max_completed = 5;
+
+        for i in 0u8..20 {
+            let hash = test_hash(200 + i);
+            let num = 2000 + i as u64;
+            tracker.on_block_proposed(hash, num, 0);
+            tracker.advance_stage(hash, num, BlockStage::Verified, 1_000_000);
+        }
+
+        assert_eq!(tracker.completed_blocks.len(), 5);
+        // Last 5 retained
+        for i in 15..20u64 {
+            let num = 2000 + i;
+            assert!(
+                tracker.get_lifecycle_by_number(num).is_some(),
+                "block {} should be retained",
+                num
+            );
+        }
+        // Older evicted
+        for i in 0..15u64 {
+            let num = 2000 + i;
+            assert!(
+                tracker.get_lifecycle_by_number(num).is_none(),
+                "block {} should be evicted",
+                num
+            );
+        }
+    }
+
+    #[test]
+    fn property_block_age_ms_never_negative() {
+        let mut tracker = BlockLifecycleTracker::new();
+        let hash = test_hash(88);
+        tracker.on_block_proposed(hash, 8800, 1_000_000_000);
+
+        let ts = [2_000_000_000, 3_000_000_000, 4_000_000_000];
+        let stages = [BlockStage::Voted, BlockStage::Finalized, BlockStage::Verified];
+
+        for (&stage, &t) in stages.iter().zip(ts.iter()) {
+            if let Some(update) = tracker.advance_stage(hash, 8800, stage, t) {
+                assert!(
+                    update.block_age_ms >= 0.0,
+                    "block_age_ms should never be negative: {}",
+                    update.block_age_ms
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn property_time_in_previous_stage_consistent() {
+        let mut tracker = BlockLifecycleTracker::new();
+        let hash = test_hash(99);
+        tracker.on_block_proposed(hash, 9900, 0);
+
+        let u1 = tracker
+            .advance_stage(hash, 9900, BlockStage::Voted, 100_000_000)
+            .unwrap();
+        assert!((u1.block_age_ms - 100.0).abs() < 0.001);
+
+        let u2 = tracker
+            .advance_stage(hash, 9900, BlockStage::Finalized, 300_000_000)
+            .unwrap();
+        assert!((u2.block_age_ms - 300.0).abs() < 0.001);
+        assert!((u2.time_in_previous_stage_ms.unwrap() - 200.0).abs() < 0.001);
+
+        let u3 = tracker
+            .advance_stage(hash, 9900, BlockStage::Verified, 500_000_000)
+            .unwrap();
+        assert!((u3.block_age_ms - 500.0).abs() < 0.001);
+        assert!((u3.time_in_previous_stage_ms.unwrap() - 200.0).abs() < 0.001);
+    }
 }

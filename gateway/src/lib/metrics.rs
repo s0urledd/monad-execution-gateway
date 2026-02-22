@@ -93,4 +93,43 @@ lazy_static! {
         "Subscribe requests rejected due to per-client subscription limit"
     ))
     .unwrap();
+
+    // ── SLO-tied latency histograms ──────────────────────────────────
+
+    /// Event publish latency in nanoseconds: time from event ring read to
+    /// broadcast channel send. Tied to SLO Section 1.1 (p99 < 5ms).
+    ///
+    /// Buckets: 100ns to 20ms in nanoseconds.
+    pub static ref EVENT_PUBLISH_LATENCY_NS: Histogram = register_histogram!(
+        "event_publish_latency_ns",
+        "Event publish latency in nanoseconds (ring read to broadcast send)",
+        vec![
+            100.0, 500.0, 1_000.0, 5_000.0, 10_000.0,
+            50_000.0, 100_000.0, 500_000.0, 1_000_000.0,
+            5_000_000.0, 20_000_000.0
+        ]
+    )
+    .unwrap();
+
+    /// WebSocket send latency in nanoseconds: time to write a single
+    /// message to the WebSocket. Tied to SLO Section 1.3 (p99 < 2ms).
+    ///
+    /// Buckets: 100ns to 5ms in nanoseconds.
+    pub static ref WS_SEND_LATENCY_NS: Histogram = register_histogram!(
+        "ws_send_latency_ns",
+        "WebSocket send latency in nanoseconds (per-message write time)",
+        vec![
+            100.0, 500.0, 1_000.0, 5_000.0, 10_000.0,
+            50_000.0, 100_000.0, 500_000.0, 1_000_000.0,
+            2_000_000.0, 5_000_000.0
+        ]
+    )
+    .unwrap();
+
+    /// Clients disconnected due to heartbeat (pong) timeout.
+    pub static ref WS_HEARTBEAT_TIMEOUT_TOTAL: Counter = register_counter!(opts!(
+        "ws_heartbeat_timeout_total",
+        "Clients disconnected due to heartbeat pong timeout"
+    ))
+    .unwrap();
 }
