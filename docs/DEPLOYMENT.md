@@ -32,6 +32,17 @@ cargo run --release --bin gateway -- --event-ring-path /path/to/ring --server-ad
 
 ## Configuration
 
+### CLI Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--server-addr` | `0.0.0.0:8443` | Listen address |
+| `--event-ring-path` | `/var/lib/hugetlbfs/.../monad-exec-events` | Path to event ring |
+| `--heartbeat-interval` | `30` | Seconds between server Ping frames |
+| `--heartbeat-timeout` | `60` | Seconds without client activity before disconnect |
+
+### Environment Variables
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RUST_LOG` | `info` | Log level |
@@ -55,7 +66,10 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/opt/monode/gateway/target/release/gateway --server-addr 0.0.0.0:8443
+ExecStart=/opt/monode/gateway/target/release/gateway \
+  --server-addr 0.0.0.0:8443 \
+  --heartbeat-interval 30 \
+  --heartbeat-timeout 60
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=info
