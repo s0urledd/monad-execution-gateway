@@ -80,3 +80,79 @@ impl<T: Hash + Eq + Clone> TopKTracker<T> {
         self.counts.clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_and_retrieve() {
+        let mut t = TopKTracker::new(10);
+        t.record("a");
+        t.record("a");
+        t.record("b");
+        let top = t.top_k(10);
+        assert_eq!(top[0].key, "a");
+        assert_eq!(top[0].count, 2);
+        assert_eq!(top[1].key, "b");
+        assert_eq!(top[1].count, 1);
+    }
+
+    #[test]
+    fn top_k_truncates() {
+        let mut t = TopKTracker::new(100);
+        for i in 0..10u32 {
+            for _ in 0..(10 - i) {
+                t.record(i);
+            }
+        }
+        let top3 = t.top_k(3);
+        assert_eq!(top3.len(), 3);
+        assert_eq!(top3[0].count, 10);
+        assert_eq!(top3[1].count, 9);
+        assert_eq!(top3[2].count, 8);
+    }
+
+    #[test]
+    fn eviction_keeps_heavy_hitter() {
+        let mut t = TopKTracker::new(2);
+        t.record("a");
+        t.record("b");
+        for _ in 0..10 {
+            t.record("a");
+        }
+        t.record("c");
+        let top = t.top_k(10);
+        assert!(top.iter().any(|e| e.key == "a" && e.count >= 5));
+    }
+
+    #[test]
+    fn reset_clears() {
+        let mut t = TopKTracker::new(10);
+        t.record("x");
+        t.reset();
+        assert!(t.top_k(10).is_empty());
+    }
+
+    #[test]
+    fn empty_tracker() {
+        let t: TopKTracker<&str> = TopKTracker::new(10);
+        assert!(t.top_k(5).is_empty());
+    }
+
+    #[test]
+    fn sorted_descending() {
+        let mut t = TopKTracker::new(10);
+        t.record("low");
+        for _ in 0..5 {
+            t.record("mid");
+        }
+        for _ in 0..10 {
+            t.record("high");
+        }
+        let top = t.top_k(10);
+        for w in top.windows(2) {
+            assert!(w[0].count >= w[1].count);
+        }
+    }
+}

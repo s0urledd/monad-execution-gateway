@@ -1363,3 +1363,112 @@ pub async fn run_server(
     info!("Gateway shut down gracefully");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── TPSTracker ─────────────────────────────────────
+
+    #[test]
+    fn tps_initial_zero() {
+        let mut t = TPSTracker::new();
+        assert_eq!(t.get_tps(), 0);
+    }
+
+    #[test]
+    fn tps_single_block() {
+        let mut t = TPSTracker::new();
+        for _ in 0..100 {
+            t.record_tx();
+        }
+        // First call: block_3 = 100, result = 0 + 0 + 50
+        assert_eq!(t.get_tps(), 50);
+    }
+
+    #[test]
+    fn tps_rolling_window() {
+        let mut t = TPSTracker::new();
+        // Block 1: 100 txs
+        for _ in 0..100 {
+            t.record_tx();
+        }
+        t.get_tps(); // rolls window
+
+        // Block 2: 200 txs
+        for _ in 0..200 {
+            t.record_tx();
+        }
+        t.get_tps(); // rolls window
+
+        // Block 3: 300 txs
+        for _ in 0..300 {
+            t.record_tx();
+        }
+        // Now: block_1=100, block_2=200, block_3=300
+        // Result: 100 + 200 + 150 = 450
+        let tps = t.get_tps();
+        assert_eq!(tps, 450);
+    }
+
+    #[test]
+    fn tps_resets_current_on_get() {
+        let mut t = TPSTracker::new();
+        for _ in 0..50 {
+            t.record_tx();
+        }
+        t.get_tps();
+        // current_tx_count should be 0 after get_tps
+        // Another get_tps with no new txs → block_3=0
+        let tps = t.get_tps();
+        // block_1=0, block_2=50, block_3=0 → 0+50+0=50
+        assert_eq!(tps, 50);
+    }
+
+    // ── parse_subscribe ────────────────────────────────
+
+    #[test]
+    fn parse_simple_subscribe() {
+        let sub = parse_subscribe(r#"{"subscribe":["BlockStart","BlockFinalized","TPS"]}"#);
+        let sub = sub.unwrap();
+        assert!(sub.event_names.contains(&EventName::BlockStart));
+        assert!(sub.event_names.contains(&EventName::BlockFinalized));
+        assert!(sub.include_tps);
+        assert!(!sub.include_contention);
+    }
+
+    #[test]
+    fn parse_metric_items() {
+        let sub = parse_subscribe(
+            r#"{"subscribe":["ContentionData","TopAccesses","Lifecycle"]}"#,
+        )
+        .unwrap();
+        assert!(sub.include_contention);
+        assert!(sub.include_top_accesses);
+        assert!(sub.include_lifecycle);
+        assert!(sub.event_names.is_empty());
+    }
+
+    #[test]
+    fn parse_advanced_subscribe() {
+        let json = r#"{"subscribe":{"events":["TxnLog"],"min_stage":"Finalized","filters":[{"event_name":"TxnLog","field_filters":[]}]}}"#;
+        let sub = parse_subscribe(json).unwrap();
+        assert!(sub.event_names.contains(&EventName::TxnLog));
+        assert_eq!(sub.min_stage, Some(BlockStage::Finalized));
+        assert!(sub.field_filter.is_some());
+    }
+
+    #[test]
+    fn parse_invalid_json_returns_none() {
+        assert!(parse_subscribe("not json").is_none());
+        assert!(parse_subscribe("{}").is_none());
+    }
+
+    #[test]
+    fn parse_unknown_event_names_skipped() {
+        let sub =
+            parse_subscribe(r#"{"subscribe":["BlockStart","FakeEvent"]}"#).unwrap();
+        assert!(sub.event_names.contains(&EventName::BlockStart));
+        assert_eq!(sub.event_names.len(), 1);
+    }
+}

@@ -4,7 +4,7 @@
  * Uses the /v1/ws/blocks channel to receive only block events + TPS.
  *
  * Usage:
- *   npx ts-node examples/subscribe-blocks.ts ws://your-validator:8443
+ *   npx ts-node examples/subscribe-blocks.ts ws://your-node:8443
  */
 
 import { GatewayClient } from "../sdk/typescript/src";

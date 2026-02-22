@@ -455,7 +455,7 @@ export interface LifecycleResponse extends Array<BlockLifecycleSummary> {}
 // ─── Client Options ─────────────────────────────────────────────────
 
 export interface GatewayClientOptions {
-  /** WebSocket URL of the gateway (e.g. "ws://your-validator:8443") */
+  /** WebSocket URL of the gateway (e.g. "ws://your-node:8443") */
   url: string;
   /** WebSocket channel to connect to (default: "all") */
   channel?: Channel;

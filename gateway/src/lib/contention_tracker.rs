@@ -295,3 +295,142 @@ impl ContentionTracker {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(n: u8) -> Address {
+        Address::repeat_byte(n)
+    }
+
+    fn slot(n: u8) -> B256 {
+        B256::repeat_byte(n)
+    }
+
+    #[test]
+    fn no_block_start_returns_none() {
+        let mut ct = ContentionTracker::new();
+        assert!(ct.on_block_end(200).is_none());
+    }
+
+    #[test]
+    fn empty_block_produces_zeros() {
+        let mut ct = ContentionTracker::new();
+        ct.on_block_start(1, 100);
+        let data = ct.on_block_end(200).unwrap();
+        assert_eq!(data.block_number, 1);
+        assert_eq!(data.total_unique_slots, 0);
+        assert_eq!(data.contended_slot_count, 0);
+        assert_eq!(data.total_txn_count, 0);
+        assert_eq!(data.contention_ratio, 0.0);
+    }
+
+    #[test]
+    fn single_txn_no_contention() {
+        let mut ct = ContentionTracker::new();
+        ct.on_block_start(1, 100);
+        ct.on_txn_start(0, 100);
+        ct.on_storage_access(addr(1), slot(1), Some(0));
+        ct.on_txn_end(0, 200);
+        let data = ct.on_block_end(300).unwrap();
+        assert_eq!(data.total_unique_slots, 1);
+        assert_eq!(data.contended_slot_count, 0);
+        assert_eq!(data.total_txn_count, 1);
+    }
+
+    #[test]
+    fn two_txns_same_slot_is_contention() {
+        let mut ct = ContentionTracker::new();
+        ct.on_block_start(1, 0);
+        ct.on_txn_start(0, 0);
+        ct.on_txn_start(1, 0);
+        ct.on_storage_access(addr(1), slot(1), Some(0));
+        ct.on_storage_access(addr(1), slot(1), Some(1));
+        ct.on_txn_end(0, 100);
+        ct.on_txn_end(1, 100);
+        let data = ct.on_block_end(200).unwrap();
+        assert_eq!(data.contended_slot_count, 1);
+        assert!(data.contention_ratio > 0.0);
+        assert_eq!(data.top_contended_slots.len(), 1);
+        assert_eq!(data.top_contended_slots[0].txn_count, 2);
+    }
+
+    #[test]
+    fn parallel_efficiency() {
+        let mut ct = ContentionTracker::new();
+        ct.on_block_start(1, 0);
+        // Two txns: total_tx_time = 80 + 90 = 170ns, wall = 100ns
+        ct.on_txn_start(0, 0);
+        ct.on_txn_start(1, 0);
+        ct.on_txn_end(0, 80);
+        ct.on_txn_end(1, 90);
+        let data = ct.on_block_end(100).unwrap();
+        assert_eq!(data.block_wall_time_ns, 100);
+        assert_eq!(data.total_tx_time_ns, 170);
+        // saved = 170 - 100 = 70; efficiency = 70/170 * 100 ≈ 41.18%
+        assert!((data.parallel_efficiency_pct - 41.18).abs() < 1.0);
+    }
+
+    #[test]
+    fn contract_co_access_edges() {
+        let mut ct = ContentionTracker::new();
+        ct.on_block_start(1, 0);
+        ct.on_txn_start(0, 0);
+        ct.on_storage_access(addr(1), slot(1), Some(0));
+        ct.on_storage_access(addr(2), slot(2), Some(0));
+        ct.on_txn_end(0, 100);
+        let data = ct.on_block_end(200).unwrap();
+        assert_eq!(data.contract_edges.len(), 1);
+        assert_eq!(data.contract_edges[0].shared_txn_count, 1);
+    }
+
+    #[test]
+    fn contended_slots_truncated_to_20() {
+        let mut ct = ContentionTracker::new();
+        ct.on_block_start(1, 0);
+        ct.on_txn_start(0, 0);
+        ct.on_txn_start(1, 0);
+        for i in 0..30u8 {
+            ct.on_storage_access(addr(i), slot(i), Some(0));
+            ct.on_storage_access(addr(i), slot(i), Some(1));
+        }
+        ct.on_txn_end(0, 100);
+        ct.on_txn_end(1, 100);
+        let data = ct.on_block_end(200).unwrap();
+        assert_eq!(data.contended_slot_count, 30);
+        assert_eq!(data.top_contended_slots.len(), 20);
+    }
+
+    #[test]
+    fn block_start_resets_state() {
+        let mut ct = ContentionTracker::new();
+        ct.on_block_start(1, 0);
+        ct.on_txn_start(0, 0);
+        ct.on_storage_access(addr(1), slot(1), Some(0));
+        ct.on_block_start(2, 500);
+        let data = ct.on_block_end(600).unwrap();
+        assert_eq!(data.block_number, 2);
+        assert_eq!(data.total_unique_slots, 0);
+        assert_eq!(data.total_txn_count, 0);
+    }
+
+    #[test]
+    fn contention_score_is_ratio() {
+        let mut ct = ContentionTracker::new();
+        ct.on_block_start(1, 0);
+        ct.on_txn_start(0, 0);
+        ct.on_txn_start(1, 0);
+        // Contract A: 2 slots, 1 contended → score = 0.5
+        ct.on_storage_access(addr(1), slot(1), Some(0));
+        ct.on_storage_access(addr(1), slot(1), Some(1));
+        ct.on_storage_access(addr(1), slot(2), Some(0));
+        ct.on_txn_end(0, 100);
+        ct.on_txn_end(1, 100);
+        let data = ct.on_block_end(200).unwrap();
+        let contract = &data.top_contended_contracts[0];
+        assert_eq!(contract.total_slots, 2);
+        assert_eq!(contract.contended_slots, 1);
+        assert!((contract.contention_score - 0.5).abs() < 0.01);
+    }
+}
