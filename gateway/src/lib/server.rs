@@ -68,7 +68,17 @@ pub enum ServerMessage {
 pub struct HelloInfo {
     pub wire_version: u32,
     pub server_version: String,
-    pub capabilities: Vec<String>,
+    pub features: Vec<String>,
+    pub limits: HelloLimits,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HelloLimits {
+    pub resume_buffer_size: usize,
+    pub client_send_buffer: usize,
+    pub slow_client_drop_limit: u64,
+    pub heartbeat_interval_secs: u64,
+    pub heartbeat_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,12 +100,12 @@ const CLIENT_SEND_BUFFER: usize = 4_096;
 /// After this many dropped messages, disconnect the slow client.
 const SLOW_CLIENT_DROP_LIMIT: u64 = 10_000;
 
-/// Interval between server-initiated WebSocket Ping frames.
-const HEARTBEAT_INTERVAL_SECS: u64 = 30;
+/// Default interval between server-initiated WebSocket Ping frames.
+const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 
-/// If no data (Pong or any message) is received within this timeout,
-/// the client is considered dead and disconnected.
-const HEARTBEAT_TIMEOUT_SECS: u64 = 60;
+/// Default client liveness timeout (no Pong or any message).
+/// Should be 2x–3x the heartbeat interval.
+const DEFAULT_HEARTBEAT_TIMEOUT_SECS: u64 = 60;
 
 /// Current wire protocol version. Incremented on breaking changes.
 const WIRE_VERSION: u32 = 1;
@@ -157,6 +167,10 @@ pub struct GatewayState {
     pub server_seqno: AtomicU64,
     /// Ring buffer of pre-serialized wire messages for zero-cost cursor-resume.
     pub(crate) event_history: Mutex<VecDeque<ReplayEntry>>,
+    /// Configurable heartbeat ping interval in seconds.
+    pub heartbeat_interval_secs: u64,
+    /// Configurable client liveness timeout in seconds.
+    pub heartbeat_timeout_secs: u64,
     /// Shutdown signal for graceful termination.
     pub(crate) shutdown: watch::Receiver<()>,
 }
@@ -688,13 +702,20 @@ async fn handle_ws(
     send_control!(ServerMessage::Hello(HelloInfo {
         wire_version: WIRE_VERSION,
         server_version: env!("CARGO_PKG_VERSION").to_string(),
-        capabilities: vec![
+        features: vec![
             "lifecycle".into(),
             "contention".into(),
             "resume".into(),
             "heartbeat".into(),
             "stage_filter".into(),
         ],
+        limits: HelloLimits {
+            resume_buffer_size: MAX_EVENT_HISTORY,
+            client_send_buffer: CLIENT_SEND_BUFFER,
+            slow_client_drop_limit: SLOW_CLIENT_DROP_LIMIT,
+            heartbeat_interval_secs: state.heartbeat_interval_secs,
+            heartbeat_timeout_secs: state.heartbeat_timeout_secs,
+        },
     }));
 
     // ── Cursor resume OR snapshot replay ──
@@ -797,7 +818,7 @@ async fn handle_ws(
     let mut messages_buf: Vec<(u64, ServerMessage)> = Vec::new();
 
     let mut heartbeat_interval =
-        tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+        tokio::time::interval(std::time::Duration::from_secs(state.heartbeat_interval_secs));
     heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut last_client_activity = Instant::now();
@@ -901,7 +922,7 @@ async fn handle_ws(
 
             _ = heartbeat_interval.tick() => {
                 // Check for client liveness
-                if last_client_activity.elapsed().as_secs() > HEARTBEAT_TIMEOUT_SECS {
+                if last_client_activity.elapsed().as_secs() > state.heartbeat_timeout_secs {
                     warn!("client-{}: heartbeat timeout (no pong for {}s), disconnecting",
                         client_id, last_client_activity.elapsed().as_secs());
                     metrics::WS_HEARTBEAT_TIMEOUT_TOTAL.inc();
@@ -1312,9 +1333,27 @@ async fn run_event_forwarder(
 // Server Entry Point
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+/// Runtime configuration for the gateway server.
+pub struct ServerConfig {
+    /// Seconds between server-initiated WebSocket Ping frames.
+    pub heartbeat_interval_secs: u64,
+    /// Seconds without client activity before disconnect.
+    pub heartbeat_timeout_secs: u64,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval_secs: DEFAULT_HEARTBEAT_INTERVAL_SECS,
+            heartbeat_timeout_secs: DEFAULT_HEARTBEAT_TIMEOUT_SECS,
+        }
+    }
+}
+
 pub async fn run_server(
     addr: SocketAddr,
     event_receiver: tokio::sync::mpsc::Receiver<EventData>,
+    config: ServerConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (event_broadcast, _) = broadcast::channel::<SequencedItem>(1_000_000);
     let (tps_tx, tps_rx) = watch::channel(0usize);
@@ -1341,6 +1380,8 @@ pub async fn run_server(
         lifecycle_tracker: RwLock::new(BlockLifecycleTracker::new()),
         server_seqno: AtomicU64::new(0),
         event_history: Mutex::new(VecDeque::with_capacity(MAX_EVENT_HISTORY)),
+        heartbeat_interval_secs: config.heartbeat_interval_secs,
+        heartbeat_timeout_secs: config.heartbeat_timeout_secs,
         shutdown: shutdown_rx,
     });
 
@@ -1394,6 +1435,7 @@ pub async fn run_server(
     info!("              http://{}/v1/blocks/lifecycle", addr);
     info!("  Metrics:    http://{}/metrics", addr);
     info!("  Health:     http://{}/health", addr);
+    info!("  Heartbeat:  ping {}s / timeout {}s", config.heartbeat_interval_secs, config.heartbeat_timeout_secs);
     info!("  Mode:       no rate limits (trusted environment)");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1596,6 +1638,8 @@ mod tests {
             lifecycle_tracker: RwLock::new(BlockLifecycleTracker::new()),
             server_seqno: AtomicU64::new(0),
             event_history: Mutex::new(VecDeque::new()),
+            heartbeat_interval_secs: DEFAULT_HEARTBEAT_INTERVAL_SECS,
+            heartbeat_timeout_secs: DEFAULT_HEARTBEAT_TIMEOUT_SECS,
             shutdown: shut_rx,
         })
     }
@@ -1702,12 +1746,22 @@ mod tests {
         let hello = HelloInfo {
             wire_version: WIRE_VERSION,
             server_version: "0.1.0".into(),
-            capabilities: vec!["lifecycle".into(), "resume".into()],
+            features: vec!["lifecycle".into(), "resume".into()],
+            limits: HelloLimits {
+                resume_buffer_size: MAX_EVENT_HISTORY,
+                client_send_buffer: CLIENT_SEND_BUFFER,
+                slow_client_drop_limit: SLOW_CLIENT_DROP_LIMIT,
+                heartbeat_interval_secs: DEFAULT_HEARTBEAT_INTERVAL_SECS,
+                heartbeat_timeout_secs: DEFAULT_HEARTBEAT_TIMEOUT_SECS,
+            },
         };
         let json = serde_json::to_string(&hello).unwrap();
         assert!(json.contains("\"wire_version\":1"));
         assert!(json.contains("\"server_version\":\"0.1.0\""));
+        assert!(json.contains("\"features\""));
         assert!(json.contains("\"lifecycle\""));
+        assert!(json.contains("\"limits\""));
+        assert!(json.contains("\"resume_buffer_size\""));
     }
 
     #[test]
@@ -1715,7 +1769,14 @@ mod tests {
         let msg = ServerMessage::Hello(HelloInfo {
             wire_version: WIRE_VERSION,
             server_version: "0.1.0".into(),
-            capabilities: vec!["lifecycle".into()],
+            features: vec!["lifecycle".into()],
+            limits: HelloLimits {
+                resume_buffer_size: MAX_EVENT_HISTORY,
+                client_send_buffer: CLIENT_SEND_BUFFER,
+                slow_client_drop_limit: SLOW_CLIENT_DROP_LIMIT,
+                heartbeat_interval_secs: DEFAULT_HEARTBEAT_INTERVAL_SECS,
+                heartbeat_timeout_secs: DEFAULT_HEARTBEAT_TIMEOUT_SECS,
+            },
         });
         let wire = WireMessage {
             server_seqno: 0,
@@ -1726,6 +1787,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["server_seqno"], 0);
         assert!(parsed["Hello"]["wire_version"].is_number());
+        assert!(parsed["Hello"]["limits"]["resume_buffer_size"].is_number());
     }
 
     #[test]
@@ -1749,10 +1811,10 @@ mod tests {
 
     #[test]
     fn heartbeat_constants() {
-        assert_eq!(HEARTBEAT_INTERVAL_SECS, 30);
-        assert_eq!(HEARTBEAT_TIMEOUT_SECS, 60);
+        assert_eq!(DEFAULT_HEARTBEAT_INTERVAL_SECS, 30);
+        assert_eq!(DEFAULT_HEARTBEAT_TIMEOUT_SECS, 60);
         // Timeout must be > interval for ping/pong to work
-        assert!(HEARTBEAT_TIMEOUT_SECS > HEARTBEAT_INTERVAL_SECS);
+        assert!(DEFAULT_HEARTBEAT_TIMEOUT_SECS > DEFAULT_HEARTBEAT_INTERVAL_SECS);
     }
 
     // ── Property tests: server_seqno monotonicity ─────────

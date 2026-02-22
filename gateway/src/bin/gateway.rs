@@ -8,6 +8,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use execution_events_gateway::event_listener;
 use execution_events_gateway::event_listener::EventData;
 use execution_events_gateway::server;
+use execution_events_gateway::server::ServerConfig;
 use tracing::warn;
 
 #[derive(Debug, Parser)]
@@ -18,6 +19,15 @@ pub struct Cli {
 
     #[arg(short, long, default_value = "0.0.0.0:8443")]
     server_addr: String,
+
+    /// Seconds between server-initiated WebSocket Ping frames.
+    #[arg(long, default_value = "30")]
+    heartbeat_interval: u64,
+
+    /// Seconds without client activity before the server disconnects.
+    /// Should be 2x–3x the heartbeat interval.
+    #[arg(long, default_value = "60")]
+    heartbeat_timeout: u64,
 }
 
 #[tokio::main]
@@ -33,6 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Cli {
         event_ring_path,
         server_addr,
+        heartbeat_interval,
+        heartbeat_timeout,
     } = Cli::parse();
 
     // Resolve the event ring path
@@ -49,9 +61,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse server address
     let addr: SocketAddr = server_addr.parse()?;
 
+    // Build server config from CLI args
+    let config = ServerConfig {
+        heartbeat_interval_secs: heartbeat_interval,
+        heartbeat_timeout_secs: heartbeat_timeout,
+    };
+
     // Run both tasks and exit when either completes
     tokio::select! {
-        result = server::run_server(addr, event_receiver) => {
+        result = server::run_server(addr, event_receiver, config) => {
             warn!("Server stopped: {:?}", result);
         }
         _ = tokio::task::spawn_blocking(move || listener_handle.join()) => {

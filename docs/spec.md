@@ -295,21 +295,37 @@ Clients may send Ping frames at any time. The server responds with Pong (handled
 
 ### 10.1 Protocol
 
-On WebSocket connect, the server sends a `Hello` control message as the **first frame** (before `Resume`):
+On WebSocket connect, the server sends a `Hello` control message as the **first frame** (before `Resume`). This is a one-way declaration — no negotiation.
 
 ```json
-{"server_seqno": 0, "Hello": {"wire_version": 1, "server_version": "0.1.0", "capabilities": ["lifecycle", "contention", "resume", "heartbeat"]}}
+{
+  "server_seqno": 0,
+  "Hello": {
+    "wire_version": 1,
+    "server_version": "0.1.0",
+    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter"],
+    "limits": {
+      "resume_buffer_size": 100000,
+      "client_send_buffer": 4096,
+      "slow_client_drop_limit": 10000,
+      "heartbeat_interval_secs": 30,
+      "heartbeat_timeout_secs": 60
+    }
+  }
+}
 ```
+
+The `features` array lists server capabilities. The `limits` object exposes operational parameters so clients can tune their behavior (e.g., reconnect strategy based on `resume_buffer_size`).
 
 ### 10.2 Client Response (Optional)
 
-Clients may send a `Hello` message to declare their capabilities:
+Clients may send a `Hello` message to identify themselves. This is purely informational — the server logs it but takes no action. If the client never sends a Hello, nothing changes.
 
 ```json
 {"hello": {"wire_version": 1, "client_name": "my-bot", "client_version": "1.0.0"}}
 ```
 
-### 10.3 Version Negotiation
+### 10.3 Version Mismatch
 
 - The server declares the wire protocol version it speaks.
 - If the client sends a `hello` with a different `wire_version`, the server logs the mismatch but continues (forward-compatible).
