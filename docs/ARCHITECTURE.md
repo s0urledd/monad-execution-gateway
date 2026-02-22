@@ -7,8 +7,8 @@
 │                        Monad Full Node                          │
 │                                                                 │
 │  ┌──────────────┐     mmap (hugepages)     ┌─────────────────┐  │
-│  │  Execution    │ ───────────────────────► │  Event Ring     │ │
-│  │  Engine (EVM) │    zero-copy writes      │  (shared memory)│ │
+│  │  Execution   │ ───────────────────────► │  Event Ring     │  │
+│  │  Engine (EVM)│    zero-copy writes      │  (shared memory)│  │
 │  └──────────────┘                           └────────┬────────┘ │
 │                                                      │ read     │
 └──────────────────────────────────────────────────────┼──────────┘
@@ -22,20 +22,20 @@
                   │  │ (ring reader)│   │ (fan-out to clients) │  │
                   │  └──────────────┘   └──────────┬───────────┘  │
                   │                                │              │
-                  │  ┌─────────────────────────────▼───────────┐ │
-                  │  │          Per-Client Pipeline            │ │
-                  │  │                                         │ │
-                  │  │  subscription filter ─► backpressure    │ │
-                  │  │  ─► bounded channel ─► WebSocket send   │ │
-                  │  └─────────────────────────────────────────┘ │
-                  │                                              │
-                  │  ┌────────────────────┐ ┌──────────────────┐ │
-                  │  │ Resume Ring Buffer │ │ REST API         │ │
-                  │  │ (100K pre-serial.  │ │ /v1/tps          │ │
-                  │  │  JSON for replay)  │ │ /v1/status       │ │
-                  │  └────────────────────┘ │ /v1/contention   │ │
-                  │                         │ /metrics         │ │
-                  │                         └──────────────────┘ │
+                  │  ┌─────────────────────────────▼───────────┐  │
+                  │  │          Per-Client Pipeline            │  │
+                  │  │                                         │  │
+                  │  │  subscription filter ─► backpressure    │  │
+                  │  │  ─► bounded channel ─► WebSocket send   │  │
+                  │  └─────────────────────────────────────────┘  │
+                  │                                               │
+                  │  ┌────────────────────┐ ┌──────────────────┐  │
+                  │  │ Resume Ring Buffer │ │ REST API         │  │
+                  │  │ (100K pre-serial.  │ │ /v1/tps          │  │
+                  │  │  JSON for replay)  │ │ /v1/status       │  │
+                  │  └────────────────────┘ │ /v1/contention   │  │
+                  │                         │ /metrics         │  │
+                  │                         └──────────────────┘  │
                   └───────────────────────────────────────────────┘
                                     │
                   ┌─────────────────┼──────────────────┐
