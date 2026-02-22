@@ -81,3 +81,44 @@ WantedBy=multi-user.target
 ```bash
 sudo systemctl enable --now monode-gateway
 ```
+
+## Monitoring
+
+### Prometheus
+
+Use the ready-to-use scrape config at `ops/prometheus/prometheus.yml`:
+
+```bash
+cp ops/prometheus/prometheus.yml /etc/prometheus/conf.d/gateway.yml
+```
+
+The gateway exposes 50+ metrics at `GET /metrics` in Prometheus text format (counters, histograms, gauges).
+
+### Grafana
+
+Import the dashboard from `ops/grafana/gateway-dashboard.json`:
+
+1. Open Grafana -> Dashboards -> Import
+2. Upload `ops/grafana/gateway-dashboard.json`
+3. Select your Prometheus datasource
+4. Dashboard includes: latency SLOs, throughput, connections, resource usage, resume stats
+
+See [SLO Definitions](slo.md) for metric descriptions and alerting recommendations.
+
+## Release Artifacts
+
+On tagged releases (`v*`), the CI pipeline produces:
+
+| Artifact | Location |
+|----------|----------|
+| Linux binary | GitHub Releases (`gateway-linux-amd64.tar.gz`) |
+| Docker images | `ghcr.io/<org>/monad-execution-gateway/gateway:<version>` |
+| TypeScript SDK | `npm install monad-execution-events@<version>` |
+| Python SDK | `pip install monad-execution-events==<version>` |
+
+To trigger a release:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```

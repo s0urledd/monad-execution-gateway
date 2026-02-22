@@ -1,0 +1,218 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  GATEWAY_IMAGE: ghcr.io/${{ github.repository }}/gateway
+  WEBHOOK_IMAGE: ghcr.io/${{ github.repository }}/webhook-relay
+
+jobs:
+  # ── Gate: run full CI before releasing ──────────────────────────
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  # ── Rust binary ─────────────────────────────────────────────────
+  build-gateway:
+    name: Build Gateway Binary
+    needs: ci
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/llvm.asc
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" | sudo tee /etc/apt/sources.list.d/llvm-19.list
+          sudo apt-get update
+          sudo apt-get install -y clang-19 libclang-19-dev libzstd-dev libhugetlbfs-dev cmake gcc g++
+
+      - name: Rust cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release --bin gateway
+        working-directory: gateway
+        env:
+          LLVM_CONFIG_PATH: /usr/bin/llvm-config-19
+
+      - name: Package binary
+        run: |
+          mkdir -p dist
+          cp gateway/target/release/gateway dist/gateway
+          cp gateway/restricted_filters.json dist/ 2>/dev/null || true
+          tar -czf gateway-linux-amd64.tar.gz -C dist .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-linux-amd64
+          path: gateway-linux-amd64.tar.gz
+
+  # ── Docker images ───────────────────────────────────────────────
+  docker:
+    name: Docker Images
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta (gateway)
+        id: meta-gw
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.GATEWAY_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Build & push gateway
+        uses: docker/build-push-action@v6
+        with:
+          context: ./gateway
+          file: ./gateway/Dockerfile_build_and_publish
+          push: true
+          tags: ${{ steps.meta-gw.outputs.tags }}
+          labels: ${{ steps.meta-gw.outputs.labels }}
+
+      - name: Docker meta (webhook-relay)
+        id: meta-wr
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.WEBHOOK_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Build & push webhook-relay
+        uses: docker/build-push-action@v6
+        with:
+          context: ./webhook-relay
+          push: true
+          tags: ${{ steps.meta-wr.outputs.tags }}
+          labels: ${{ steps.meta-wr.outputs.labels }}
+
+  # ── npm publish ─────────────────────────────────────────────────
+  npm:
+    name: Publish npm
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Install & build
+        run: npm ci && npm run build
+        working-directory: sdk/typescript
+
+      - name: Set version from tag
+        run: npm version "${{ github.ref_name }}" --no-git-tag-version --allow-same-version
+        working-directory: sdk/typescript
+
+      - name: Publish
+        run: npm publish --access public
+        working-directory: sdk/typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ── PyPI publish ────────────────────────────────────────────────
+  pypi:
+    name: Publish PyPI
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Set version from tag
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
+        working-directory: sdk/python
+
+      - name: Build
+        run: python -m build
+        working-directory: sdk/python
+
+      - name: Publish
+        run: twine upload dist/*
+        working-directory: sdk/python
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+
+  # ── GitHub Release ──────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [build-gateway, docker, npm, pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gateway-linux-amd64
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: gateway-linux-amd64.tar.gz
+          body: |
+            ## Install
+
+            **Docker (recommended):**
+            ```bash
+            docker pull ${{ env.GATEWAY_IMAGE }}:${{ github.ref_name }}
+            ```
+
+            **Binary:**
+            ```bash
+            tar xzf gateway-linux-amd64.tar.gz
+            ./gateway --server-addr 0.0.0.0:8443
+            ```
+
+            **TypeScript SDK:**
+            ```bash
+            npm install monad-execution-events@${{ github.ref_name }}
+            ```
+
+            **Python SDK:**
+            ```bash
+            pip install monad-execution-events==${{ github.ref_name }}
+            ```
