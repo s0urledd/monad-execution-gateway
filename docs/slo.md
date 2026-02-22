@@ -140,7 +140,6 @@ time() - gateway_last_event_timestamp_seconds
 | Metric | Target |
 |--------|--------|
 | Max concurrent WebSocket connections | > 500 |
-| Max connections per IP | 10 (configurable) |
 | Broadcast fan-out | O(1) per client (non-blocking) |
 
 ---
@@ -186,8 +185,7 @@ All metrics exposed at `/metrics` in Prometheus text format.
 | `ws_disconnect_total` | Total disconnections | Section 3.1 |
 | `resume_delta_total` | Successful cursor resumes | Section 5.2 |
 | `resume_snapshot_total` | Snapshot fallback resumes | Section 5.2 |
-| `ws_rejected_ip_limit_total` | Rejected by IP limit | Section 4.2 |
-| `ws_rejected_sub_limit_total` | Rejected subscribe updates | Section 3.1 |
+| `ws_heartbeat_timeout_total` | Clients disconnected by heartbeat timeout | Section 3.1 |
 
 ### 6.3 Histograms
 

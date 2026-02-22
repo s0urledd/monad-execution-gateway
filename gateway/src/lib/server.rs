@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -90,12 +90,6 @@ const CLIENT_SEND_BUFFER: usize = 4_096;
 /// After this many dropped messages, disconnect the slow client.
 const SLOW_CLIENT_DROP_LIMIT: u64 = 10_000;
 
-/// Maximum concurrent WebSocket connections from a single IP address.
-const MAX_CONNECTIONS_PER_IP: usize = 10;
-
-/// Maximum number of subscribe-message updates a single client may send.
-const MAX_SUBSCRIBES_PER_CLIENT: usize = 5;
-
 /// Interval between server-initiated WebSocket Ping frames.
 const HEARTBEAT_INTERVAL_SECS: u64 = 30;
 
@@ -163,35 +157,8 @@ pub struct GatewayState {
     pub server_seqno: AtomicU64,
     /// Ring buffer of pre-serialized wire messages for zero-cost cursor-resume.
     pub(crate) event_history: Mutex<VecDeque<ReplayEntry>>,
-    /// Per-IP active connection counter for rate limiting.
-    ip_connections: Mutex<HashMap<IpAddr, usize>>,
     /// Shutdown signal for graceful termination.
     pub(crate) shutdown: watch::Receiver<()>,
-}
-
-impl GatewayState {
-    /// Try to acquire a connection slot for this IP.
-    /// Returns `true` if the slot was acquired, `false` if the limit is reached.
-    fn acquire_ip_slot(&self, ip: IpAddr) -> bool {
-        let mut map = self.ip_connections.lock().unwrap();
-        let count = map.entry(ip).or_insert(0);
-        if *count >= MAX_CONNECTIONS_PER_IP {
-            return false;
-        }
-        *count += 1;
-        true
-    }
-
-    /// Release a connection slot for this IP.
-    fn release_ip_slot(&self, ip: IpAddr) {
-        let mut map = self.ip_connections.lock().unwrap();
-        if let Some(count) = map.get_mut(&ip) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                map.remove(&ip);
-            }
-        }
-    }
 }
 
 /// Extract the real client IP from proxy headers, falling back to the socket address.
@@ -528,15 +495,6 @@ fn try_upgrade(
     resume_from: Option<u64>,
     ip: IpAddr,
 ) -> axum::response::Response {
-    if !state.acquire_ip_slot(ip) {
-        metrics::WS_REJECTED_IP_LIMIT.inc();
-        warn!("Rejected WebSocket from {} (per-IP limit {})", ip, MAX_CONNECTIONS_PER_IP);
-        return (
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "Too many connections from this IP",
-        )
-            .into_response();
-    }
     ws.on_upgrade(move |socket| handle_ws(socket, state, channel, resume_from, ip))
         .into_response()
 }
@@ -837,7 +795,6 @@ async fn handle_ws(
     // ── Live event loop with heartbeat ──
     let mut events_buf: Vec<SerializableEventData> = Vec::new();
     let mut messages_buf: Vec<(u64, ServerMessage)> = Vec::new();
-    let mut unique_subscribe_count: usize = 0;
 
     let mut heartbeat_interval =
         tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
@@ -922,13 +879,7 @@ async fn handle_ws(
                                     if new_sub == subscription {
                                         continue;
                                     }
-                                    if unique_subscribe_count >= MAX_SUBSCRIBES_PER_CLIENT {
-                                        metrics::WS_REJECTED_SUB_LIMIT.inc();
-                                        warn!("client-{}: unique subscribe limit reached ({}), ignoring", client_id, MAX_SUBSCRIBES_PER_CLIENT);
-                                        continue;
-                                    }
-                                    unique_subscribe_count += 1;
-                                    info!("client-{} updated subscription ({}/{})", client_id, unique_subscribe_count, MAX_SUBSCRIBES_PER_CLIENT);
+                                    info!("client-{} updated subscription", client_id);
                                     subscription = new_sub;
                                 }
                             }
@@ -975,7 +926,6 @@ async fn handle_ws(
     drop(client_tx);
     let _ = send_task.await;
     state.connected_clients.fetch_sub(1, Ordering::Relaxed);
-    state.release_ip_slot(ip);
     metrics::WS_ACTIVE_CONNECTIONS.dec();
     metrics::WS_DISCONNECT_TOTAL.inc();
     if drop_count > 0 {
@@ -1391,7 +1341,6 @@ pub async fn run_server(
         lifecycle_tracker: RwLock::new(BlockLifecycleTracker::new()),
         server_seqno: AtomicU64::new(0),
         event_history: Mutex::new(VecDeque::with_capacity(MAX_EVENT_HISTORY)),
-        ip_connections: Mutex::new(HashMap::new()),
         shutdown: shutdown_rx,
     });
 
@@ -1445,10 +1394,7 @@ pub async fn run_server(
     info!("              http://{}/v1/blocks/lifecycle", addr);
     info!("  Metrics:    http://{}/metrics", addr);
     info!("  Health:     http://{}/health", addr);
-    info!(
-        "  Limits:     max {}/IP, max {} subscribes/client",
-        MAX_CONNECTIONS_PER_IP, MAX_SUBSCRIBES_PER_CLIENT
-    );
+    info!("  Mode:       no rate limits (trusted environment)");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(
@@ -1631,7 +1577,7 @@ mod tests {
         assert_eq!(real_ip(&headers, fallback), "3.3.3.3".parse::<IpAddr>().unwrap());
     }
 
-    // ── IP slot limiting ──────────────────────────────────
+    // ── Test helpers ──────────────────────────────────────
 
     fn build_test_state() -> Arc<GatewayState> {
         let (broadcast_tx, _) = broadcast::channel::<SequencedItem>(16);
@@ -1650,54 +1596,8 @@ mod tests {
             lifecycle_tracker: RwLock::new(BlockLifecycleTracker::new()),
             server_seqno: AtomicU64::new(0),
             event_history: Mutex::new(VecDeque::new()),
-            ip_connections: Mutex::new(HashMap::new()),
             shutdown: shut_rx,
         })
-    }
-
-    #[test]
-    fn ip_slot_acquire_up_to_limit() {
-        let state = build_test_state();
-        let ip: IpAddr = "10.0.0.1".parse().unwrap();
-        for _ in 0..MAX_CONNECTIONS_PER_IP {
-            assert!(state.acquire_ip_slot(ip));
-        }
-        // 11th should fail
-        assert!(!state.acquire_ip_slot(ip));
-    }
-
-    #[test]
-    fn ip_slot_release_allows_new() {
-        let state = build_test_state();
-        let ip: IpAddr = "10.0.0.2".parse().unwrap();
-        for _ in 0..MAX_CONNECTIONS_PER_IP {
-            state.acquire_ip_slot(ip);
-        }
-        assert!(!state.acquire_ip_slot(ip));
-        state.release_ip_slot(ip);
-        assert!(state.acquire_ip_slot(ip));
-    }
-
-    #[test]
-    fn ip_slot_different_ips_independent() {
-        let state = build_test_state();
-        let ip_a: IpAddr = "10.0.0.3".parse().unwrap();
-        let ip_b: IpAddr = "10.0.0.4".parse().unwrap();
-        for _ in 0..MAX_CONNECTIONS_PER_IP {
-            state.acquire_ip_slot(ip_a);
-        }
-        // ip_b should still be available
-        assert!(state.acquire_ip_slot(ip_b));
-    }
-
-    #[test]
-    fn ip_slot_release_removes_entry_at_zero() {
-        let state = build_test_state();
-        let ip: IpAddr = "10.0.0.5".parse().unwrap();
-        state.acquire_ip_slot(ip);
-        state.release_ip_slot(ip);
-        let map = state.ip_connections.lock().unwrap();
-        assert!(!map.contains_key(&ip));
     }
 
     // ── Ring buffer eviction ──────────────────────────────
@@ -1793,7 +1693,6 @@ mod tests {
         // Verify the constant matches documented behavior
         assert_eq!(SLOW_CLIENT_DROP_LIMIT, 10_000);
         assert_eq!(CLIENT_SEND_BUFFER, 4_096);
-        assert_eq!(MAX_CONNECTIONS_PER_IP, 10);
     }
 
     // ── Wire version & Hello ──────────────────────────────

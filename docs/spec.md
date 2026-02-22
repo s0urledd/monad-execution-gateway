@@ -131,11 +131,7 @@ Each channel has a default subscription applied on connect:
 
 ### 3.2 Subscribe Protocol
 
-Clients may send a JSON text frame to update their subscription. Each subscribe message **replaces** the current subscription entirely.
-
-**Limits:**
-- Maximum **5** unique subscribe updates per connection (identical subscriptions don't count).
-- Exceeding the limit: server ignores the message and increments `ws_rejected_sub_limit_total`.
+Clients may send a JSON text frame to update their subscription. Each subscribe message **replaces** the current subscription entirely. Identical subscriptions (same as current) are silently ignored.
 
 ### 3.3 Filter Evaluation Order
 
@@ -228,30 +224,9 @@ On gateway restart:
 
 ---
 
-## 6. Connection Limits
+## 6. Abuse Protection
 
-### 6.1 Per-IP Rate Limiting
-
-| Parameter | Value |
-|-----------|-------|
-| Max connections per IP | 10 |
-| Enforcement | On WebSocket upgrade |
-| Response on rejection | HTTP 429 Too Many Requests |
-| Metric | `ws_rejected_ip_limit_total` |
-
-### 6.2 Slot Lifecycle
-
-- **Acquire**: On successful WebSocket upgrade.
-- **Release**: On WebSocket disconnect (normal close, error, or forced disconnect).
-- **Tracking**: `HashMap<IpAddr, usize>` protected by `Mutex`.
-- **Cleanup**: Entry removed from map when count reaches 0.
-
-### 6.3 IP Resolution
-
-The real client IP is resolved in this priority order:
-1. `X-Forwarded-For` header (first IP in the comma-separated list)
-2. `X-Real-IP` header
-3. Socket address (ConnectInfo)
+The gateway does **not** enforce public abuse limits. It is designed to run in trusted or operator-controlled environments. Deployment-level protections (reverse proxy, firewall, auth) are out of scope.
 
 ---
 

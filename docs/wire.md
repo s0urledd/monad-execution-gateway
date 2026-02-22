@@ -368,7 +368,7 @@ Client                                          Server
   │◄──────────────────────────────────────────────┤  ongoing
   │                                               │
   │  Subscribe {events, filters}                  │
-  ├──────────────────────────────────────────────►│  (optional, up to 5x)
+  ├──────────────────────────────────────────────►│  (optional, unlimited)
   │                                               │
   │  Ping                                         │
   │◄──────────────────────────────────────────────┤  every 30s
@@ -383,8 +383,6 @@ Client                                          Server
 
 | Error | Server Behavior |
 |-------|-----------------|
-| Per-IP limit exceeded | HTTP 429 (no WebSocket upgrade) |
-| Subscribe limit exceeded | Message silently ignored |
 | Slow client (10K drops) | Server closes connection |
 | Client Pong timeout | Server closes connection |
 | Invalid JSON from client | Message ignored |
