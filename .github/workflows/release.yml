@@ -115,11 +115,13 @@ jobs:
           tags: ${{ steps.meta-wr.outputs.tags }}
           labels: ${{ steps.meta-wr.outputs.labels }}
 
-  # ── npm publish ─────────────────────────────────────────────────
+  # ── npm publish (skipped if NPM_TOKEN secret is not set) ────────
   npm:
     name: Publish npm
     needs: ci
     runs-on: ubuntu-latest
+    # Only run if the secret exists — secrets are empty strings when unset
+    if: ${{ secrets.NPM_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -133,7 +135,10 @@ jobs:
         working-directory: sdk/typescript
 
       - name: Set version from tag
-        run: npm version "${{ github.ref_name }}" --no-git-tag-version --allow-same-version
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
         working-directory: sdk/typescript
 
       - name: Publish
@@ -142,11 +147,12 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-  # ── PyPI publish ────────────────────────────────────────────────
+  # ── PyPI publish (skipped if PYPI_TOKEN secret is not set) ──────
   pypi:
     name: Publish PyPI
     needs: ci
     runs-on: ubuntu-latest
+    if: ${{ secrets.PYPI_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -175,10 +181,12 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
 
-  # ── GitHub Release ──────────────────────────────────────────────
+  # ── GitHub Release (only needs binary + docker, npm/pypi optional)
   release:
     name: Create GitHub Release
-    needs: [build-gateway, docker, npm, pypi]
+    needs: [build-gateway, docker]
+    # Always run even if npm/pypi were skipped
+    if: ${{ always() && needs.build-gateway.result == 'success' && needs.docker.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
