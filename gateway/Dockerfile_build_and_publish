@@ -1,5 +1,5 @@
 # Builder stage
-FROM rust:1.91-slim AS builder
+FROM rust:1.91-slim-bookworm AS builder
 
 # Install build dependencies
 # The Monad Execution Events SDK requires clang-19+ for C23 constexpr support.
@@ -36,7 +36,7 @@ ENV LLVM_CONFIG_PATH=/usr/bin/llvm-config-19
 RUN cargo build --release --bin gateway
 
 # Runtime stage
-FROM rust:1.91-slim AS runtime
+FROM rust:1.91-slim-bookworm AS runtime
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \

@@ -1,4 +1,4 @@
-FROM rust:1.91-slim
+FROM rust:1.91-slim-bookworm
 
 # Install build dependencies
 # The Monad Execution Events SDK requires clang-19+ for C23 constexpr support.

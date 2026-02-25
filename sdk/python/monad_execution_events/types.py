@@ -6,7 +6,7 @@ All hex values (addresses, hashes, U256) are 0x-prefixed strings.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
 

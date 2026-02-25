@@ -45,13 +45,8 @@ import websockets
 import websockets.exceptions
 
 from .types import (
-    BlockLifecycleUpdate,
     BlockStage,
-    Channel,
     CHANNEL_PATHS,
-    ContentionData,
-    EventName,
-    ExecEvent,
     GatewayClientOptions,
     ResumeMode,
     ServerMessage,
