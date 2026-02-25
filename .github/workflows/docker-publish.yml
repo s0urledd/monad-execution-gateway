@@ -1,0 +1,64 @@
+name: Publish Docker Images
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  GATEWAY_IMAGE: ghcr.io/${{ github.repository }}/gateway
+  WEBHOOK_IMAGE: ghcr.io/${{ github.repository }}/webhook-relay
+
+jobs:
+  docker:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta (gateway)
+        id: meta-gw
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.GATEWAY_IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+
+      - name: Build & push gateway
+        uses: docker/build-push-action@v6
+        with:
+          context: ./gateway
+          file: ./gateway/Dockerfile_build_and_publish
+          push: true
+          tags: ${{ steps.meta-gw.outputs.tags }}
+          labels: ${{ steps.meta-gw.outputs.labels }}
+
+      - name: Docker meta (webhook-relay)
+        id: meta-wr
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.WEBHOOK_IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+
+      - name: Build & push webhook-relay
+        uses: docker/build-push-action@v6
+        with:
+          context: ./webhook-relay
+          push: true
+          tags: ${{ steps.meta-wr.outputs.tags }}
+          labels: ${{ steps.meta-wr.outputs.labels }}
