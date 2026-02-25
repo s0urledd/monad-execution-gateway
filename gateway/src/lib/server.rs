@@ -971,7 +971,7 @@ fn process_item_with_seqno(
 ) {
     match item {
         EventDataOrMetrics::Event(event_data) => {
-            let mut serializable = SerializableEventData::from(event_data);
+            let mut serializable = SerializableEventData::from(event_data.as_ref());
             // Attach commit_stage from lifecycle tracker
             if let Some(block_number) = event_data.block_number {
                 if let Ok(lc) = state.lifecycle_tracker.read() {
@@ -1102,7 +1102,7 @@ async fn rest_metrics() -> impl IntoResponse {
 fn serialize_for_replay(seqno: u64, item: &EventDataOrMetrics, state: &GatewayState) -> String {
     let msg = match item {
         EventDataOrMetrics::Event(event_data) => {
-            let mut serializable = SerializableEventData::from(event_data);
+            let mut serializable = SerializableEventData::from(event_data.as_ref());
             if let Some(block_number) = event_data.block_number {
                 if let Ok(lc) = state.lifecycle_tracker.read() {
                     serializable.commit_stage = lc.current_stage_by_number(block_number);
