@@ -254,6 +254,13 @@ class GatewayClient:
             async with s.get(f"{url}/v1/blocks/lifecycle") as r:
                 return await r.json()  # type: ignore[return-value]
 
+    @staticmethod
+    async def fetch_block_lifecycle(base_url: str, block_number: int) -> dict[str, Any]:
+        url = base_url.rstrip("/")
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{url}/v1/blocks/{block_number}/lifecycle") as r:
+                return await r.json()  # type: ignore[return-value]
+
     # ── Private ──────────────────────────────────────────────────────
 
     def _build_ws_url(self) -> str:

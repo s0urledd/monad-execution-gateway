@@ -135,6 +135,35 @@ class BlockLifecycleUpdate:
 
 
 @dataclass
+class BlockLifecycleSummary:
+    """Full lifecycle summary for a single block (REST response)."""
+
+    block_hash: str
+    block_number: int
+    current_stage: BlockStage
+    txn_count: int
+    stage_timings_ms: dict[str, float]
+    gas_used: int | None = None
+    eth_block_hash: str | None = None
+    execution_time_ms: float | None = None
+    total_age_ms: float | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> BlockLifecycleSummary:
+        return cls(
+            block_hash=d["block_hash"],
+            block_number=d["block_number"],
+            current_stage=BlockStage(d["current_stage"]),
+            txn_count=d["txn_count"],
+            stage_timings_ms=d.get("stage_timings_ms", {}),
+            gas_used=d.get("gas_used"),
+            eth_block_hash=d.get("eth_block_hash"),
+            execution_time_ms=d.get("execution_time_ms"),
+            total_age_ms=d.get("total_age_ms"),
+        )
+
+
+@dataclass
 class ContentionData:
     block_number: int
     block_wall_time_ns: int
