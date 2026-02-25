@@ -130,8 +130,8 @@ jobs:
     name: Publish npm
     needs: ci
     runs-on: ubuntu-latest
-    # Only run if the secret exists — secrets are empty strings when unset
-    if: ${{ secrets.NPM_TOKEN != '' }}
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -152,6 +152,7 @@ jobs:
         working-directory: sdk/typescript
 
       - name: Publish
+        if: env.NPM_TOKEN != ''
         run: npm publish --access public
         working-directory: sdk/typescript
         env:
@@ -162,7 +163,8 @@ jobs:
     name: Publish PyPI
     needs: ci
     runs-on: ubuntu-latest
-    if: ${{ secrets.PYPI_TOKEN != '' }}
+    env:
+      PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -185,6 +187,7 @@ jobs:
         working-directory: sdk/python
 
       - name: Publish
+        if: env.PYPI_TOKEN != ''
         run: twine upload dist/*
         working-directory: sdk/python
         env:
