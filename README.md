@@ -25,7 +25,7 @@ cd monad-execution-gateway
 docker compose up -d
 
 # With monitoring (Prometheus + Grafana)
-docker compose -f docker-compose.monitoring.yml up -d
+docker compose --profile monitoring up -d
 
 # Native
 cd gateway && ./build.sh --run
