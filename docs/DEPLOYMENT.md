@@ -84,6 +84,14 @@ sudo systemctl enable --now monode-gateway
 
 ## Monitoring
 
+### Docker (recommended)
+
+```bash
+docker compose --profile monitoring up -d
+```
+
+This starts gateway + Prometheus (`:9095`) + Grafana (`:3001`, admin/admin) in a single command. Without the `--profile` flag, only the gateway starts.
+
 ### Prometheus
 
 Use the ready-to-use scrape config at `ops/prometheus/prometheus.yml`:
