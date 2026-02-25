@@ -327,12 +327,13 @@ impl BlockLifecycleTracker {
         }
 
         let from_stage = lifecycle.current_stage;
-        let time_in_previous_stage_ms = lifecycle.duration_in_stage_ms(from_stage);
 
-        // Record the transition
+        // Record the transition FIRST so duration_in_stage_ms can see the
+        // new timestamp as the "next stage" boundary.
         lifecycle.stage_timestamps.insert(new_stage, timestamp_ns);
         lifecycle.current_stage = new_stage;
 
+        let time_in_previous_stage_ms = lifecycle.duration_in_stage_ms(from_stage);
         let block_age_ms = lifecycle.total_age_ms().unwrap_or(0.0);
 
         let update = BlockLifecycleUpdate {

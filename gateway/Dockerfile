@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     libzstd-dev \
     libhugetlbfs-dev \
+    libbsd-dev \
     software-properties-common \
     && wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc \
     && echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-19 main" > /etc/apt/sources.list.d/llvm-19.list \
@@ -34,7 +35,8 @@ COPY . .
 # alignment warning that clang-19 emits with -Werror.
 ENV LLVM_CONFIG_PATH=/usr/bin/llvm-config-19
 ENV CC=clang-19
-ENV CFLAGS="-Wno-error=atomic-alignment"
+ENV CFLAGS="-Wno-error=atomic-alignment -include bsd/string.h"
+ENV RUSTFLAGS="-C link-arg=-lbsd"
 
 # Build the binary
 RUN cargo build --release --bin gateway

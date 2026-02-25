@@ -117,7 +117,7 @@ const WIRE_VERSION: u32 = 1;
 /// Every broadcast item is tagged with a monotonic server-level seqno.
 /// This seqno is independent of the per-event ring-buffer seqno.
 #[derive(Debug, Clone)]
-struct SequencedItem {
+pub(crate) struct SequencedItem {
     seqno: u64,
     item: EventDataOrMetrics,
 }
@@ -125,7 +125,7 @@ struct SequencedItem {
 /// Ring buffer entry: pre-serialized JSON ready to replay byte-for-byte.
 /// Avoids re-processing and re-serializing on cursor resume.
 #[derive(Clone)]
-struct ReplayEntry {
+pub(crate) struct ReplayEntry {
     seqno: u64,
     json: String,
 }
@@ -357,6 +357,7 @@ struct ClientHello {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ClientMessage {
+    #[allow(dead_code)]
     Subscribe(SubscribeMessage),
     Hello { hello: ClientHello },
 }
@@ -609,7 +610,7 @@ async fn handle_ws(
     // Helper: try_send with backpressure tracking
     let mut drop_count: u64 = 0;
     let mut total_sent: u64 = 0;
-    let mut send_or_drop = |client_tx: &mpsc::Sender<String>,
+    let send_or_drop = |client_tx: &mpsc::Sender<String>,
                             json: String,
                             client_id: usize,
                             drop_count: &mut u64,
@@ -1285,7 +1286,7 @@ async fn run_event_forwarder(
                 // ── Broadcast: event first, then metrics ──
                 // Helper closure: assign seqno, pre-serialize for ring buffer, broadcast
                 let publish_start = Instant::now();
-                let mut broadcast_item = |item: EventDataOrMetrics, state: &Arc<GatewayState>, tx: &broadcast::Sender<SequencedItem>| {
+                let broadcast_item = |item: EventDataOrMetrics, state: &Arc<GatewayState>, tx: &broadcast::Sender<SequencedItem>| {
                     let seqno = state.server_seqno.fetch_add(1, Ordering::Relaxed) + 1;
                     // Pre-serialize once for the ring buffer (zero-cost replay)
                     let json = serialize_for_replay(seqno, &item, state);
