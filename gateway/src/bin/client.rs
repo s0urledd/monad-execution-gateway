@@ -178,6 +178,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(ServerMessage::Resume(resume)) => {
                                 info!("Received Resume: mode={}", resume.mode);
                             }
+                            Ok(ServerMessage::Warning(warning)) => {
+                                warn!("Backpressure warning: dropped={}, drop_limit={}", warning.dropped, warning.drop_limit);
+                            }
                             Err(_) => {
                                 error!("Failed to parse events: {}", text);
                             }

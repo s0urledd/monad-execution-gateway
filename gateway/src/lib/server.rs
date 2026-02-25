@@ -677,10 +677,13 @@ async fn handle_ws(
     };
 
     // ── Helper: send a control frame and bail on failure ──
+    // Control frames (Hello, Resume) always use server_seqno=0, matching
+    // the Warning frame and the wire protocol spec.  Clients must NOT
+    // update their resume cursor from frames with seqno=0.
     macro_rules! send_control {
         ($msg:expr) => {
             let wire = WireMessage {
-                server_seqno: state.server_seqno.load(Ordering::Relaxed),
+                server_seqno: 0,
                 message: &$msg,
             };
             if let Ok(json) = serde_json::to_string(&wire) {
