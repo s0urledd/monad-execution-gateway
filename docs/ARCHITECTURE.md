@@ -291,6 +291,7 @@ Broadcast ──────►│  Per-client bounded channel       │──�
                  │  DROP message + increment counter │
                  │                                   │
                  │  Every 1,000 drops: log warning   │
+                 │  + send Warning frame to client   │
                  │  After 10,000 drops: DISCONNECT   │
                  └──────────────────────────────────┘
 ```
@@ -301,14 +302,25 @@ Broadcast ──────►│  Per-client bounded channel       │──�
 |-----------|-------|---------|
 | `CLIENT_SEND_BUFFER` | 4,096 | Per-client channel capacity |
 | `SLOW_CLIENT_DROP_LIMIT` | 10,000 | Cumulative drops before disconnect |
-| Warning interval | Every 1,000 drops | Logged server-side |
+| Warning interval | Every 1,000 drops | Logged server-side + `Warning` frame sent to client (best-effort) |
+
+### Backpressure Warning Frame
+
+Every 1,000 drops, the server queues a `Warning` frame for the client (injected on the next successful send):
+
+```json
+{"server_seqno": 0, "Warning": {"type": "backpressure", "dropped": 1000, "drop_limit": 10000}}
+```
+
+This is best-effort — if the channel is still full, the warning is skipped. Advertised via `backpressure_notify` in the `Hello` features list.
 
 ### What Clients Should Do
 
 1. **Process messages fast**: Don't do heavy work in the message handler. Push to a queue.
-2. **Track drops**: If you see gaps in `server_seqno`, you're being backpressured.
-3. **Use `resume_from`**: After disconnect, reconnect with your last seqno to replay missed messages.
-4. **Subscribe narrowly**: Only subscribe to event types you need. Use field filters.
+2. **Watch for Warning frames**: A `Warning` with `type: "backpressure"` means you're falling behind.
+3. **Track drops**: If you see gaps in `server_seqno`, you're being backpressured.
+4. **Use `resume_from`**: After disconnect, reconnect with your last seqno to replay missed messages.
+5. **Subscribe narrowly**: Only subscribe to event types you need. Use field filters.
 
 ### Drop Detection
 
@@ -339,7 +351,7 @@ On every WebSocket connect, the server sends a `Hello` control message as the **
   "Hello": {
     "wire_version": 1,
     "server_version": "0.1.0",
-    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter"],
+    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter", "backpressure_notify"],
     "limits": {
       "resume_buffer_size": 100000,
       "client_send_buffer": 4096,

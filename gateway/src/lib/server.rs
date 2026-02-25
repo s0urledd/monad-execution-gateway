@@ -62,6 +62,8 @@ pub enum ServerMessage {
     /// Control message sent after Hello on connect.
     /// `mode` is `"resume"` (cursor hit) or `"snapshot"` (full state replay).
     Resume(ResumeMode),
+    /// Best-effort warning sent to the client every 1,000 drops.
+    Warning(BackpressureWarning),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +86,17 @@ pub struct HelloLimits {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResumeMode {
     pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackpressureWarning {
+    /// Always `"backpressure"`.
+    #[serde(rename = "type")]
+    pub warning_type: String,
+    /// Cumulative number of messages dropped for this client.
+    pub dropped: u64,
+    /// Drop limit before the server disconnects the client.
+    pub drop_limit: u64,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -610,12 +623,31 @@ async fn handle_ws(
     // Helper: try_send with backpressure tracking
     let mut drop_count: u64 = 0;
     let mut total_sent: u64 = 0;
+    let mut pending_warning: Option<u64> = None;
     let send_or_drop = |client_tx: &mpsc::Sender<String>,
                             json: String,
                             client_id: usize,
                             drop_count: &mut u64,
-                            total_sent: &mut u64|
+                            total_sent: &mut u64,
+                            pending_warning: &mut Option<u64>|
      -> bool {
+        // Best-effort: inject pending backpressure Warning frame before the real message
+        if let Some(dropped) = pending_warning.take() {
+            let warning = ServerMessage::Warning(BackpressureWarning {
+                warning_type: "backpressure".into(),
+                dropped,
+                drop_limit: SLOW_CLIENT_DROP_LIMIT,
+            });
+            let wire = WireMessage {
+                server_seqno: 0,
+                message: &warning,
+            };
+            if let Ok(warn_json) = serde_json::to_string(&wire) {
+                // Best-effort: if the channel is full, skip the warning
+                let _ = client_tx.try_send(warn_json);
+            }
+        }
+
         match client_tx.try_send(json) {
             Ok(_) => {
                 *total_sent += 1;
@@ -629,6 +661,7 @@ async fn handle_ws(
                         "client-{}: backpressure — dropped {} messages (sent {})",
                         client_id, drop_count, total_sent
                     );
+                    *pending_warning = Some(*drop_count);
                 }
                 if *drop_count >= SLOW_CLIENT_DROP_LIMIT {
                     warn!(
@@ -657,6 +690,7 @@ async fn handle_ws(
                     client_id,
                     &mut drop_count,
                     &mut total_sent,
+                    &mut pending_warning,
                 ) {
                     state.connected_clients.fetch_sub(1, Ordering::Relaxed);
                     metrics::WS_ACTIVE_CONNECTIONS.dec();
@@ -674,7 +708,8 @@ async fn handle_ws(
                          channel: &Channel,
                          client_id: usize,
                          drop_count: &mut u64,
-                         total_sent: &mut u64|
+                         total_sent: &mut u64,
+                         pending_warning: &mut Option<u64>|
      -> bool {
         let replay_msgs = build_replay(channel, state);
         let current_seqno = state.server_seqno.load(Ordering::Relaxed);
@@ -684,7 +719,7 @@ async fn handle_ws(
                 message: msg,
             };
             if let Ok(json) = serde_json::to_string(&wire) {
-                if !send_or_drop(client_tx, json, client_id, drop_count, total_sent) {
+                if !send_or_drop(client_tx, json, client_id, drop_count, total_sent, pending_warning) {
                     return false;
                 }
             }
@@ -709,6 +744,7 @@ async fn handle_ws(
             "resume".into(),
             "heartbeat".into(),
             "stage_filter".into(),
+            "backpressure_notify".into(),
         ],
         limits: HelloLimits {
             resume_buffer_size: MAX_EVENT_HISTORY,
@@ -755,6 +791,7 @@ async fn handle_ws(
                 client_id,
                 &mut drop_count,
                 &mut total_sent,
+                &mut pending_warning,
             ) {
                 state.connected_clients.fetch_sub(1, Ordering::Relaxed);
                 metrics::WS_ACTIVE_CONNECTIONS.dec();
@@ -777,6 +814,7 @@ async fn handle_ws(
                     client_id,
                     &mut drop_count,
                     &mut total_sent,
+                    &mut pending_warning,
                 ) {
                     state.connected_clients.fetch_sub(1, Ordering::Relaxed);
                     metrics::WS_ACTIVE_CONNECTIONS.dec();
@@ -804,6 +842,7 @@ async fn handle_ws(
             client_id,
             &mut drop_count,
             &mut total_sent,
+            &mut pending_warning,
         ) {
             state.connected_clients.fetch_sub(1, Ordering::Relaxed);
             metrics::WS_ACTIVE_CONNECTIONS.dec();
@@ -850,7 +889,7 @@ async fn handle_ws(
                             let msg = ServerMessage::Events(std::mem::take(&mut events_buf));
                             let wire = WireMessage { server_seqno: batch_seqno, message: &msg };
                             if let Ok(json) = serde_json::to_string(&wire) {
-                                if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
+                                if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent, &mut pending_warning) {
                                     break;
                                 }
                             }
@@ -860,7 +899,7 @@ async fn handle_ws(
                         for (seqno, msg) in std::mem::take(&mut messages_buf) {
                             let wire = WireMessage { server_seqno: seqno, message: &msg };
                             if let Ok(json) = serde_json::to_string(&wire) {
-                                if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
+                                if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent, &mut pending_warning) {
                                     break;
                                 }
                             }

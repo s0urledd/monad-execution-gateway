@@ -11,7 +11,7 @@
 docker compose up -d
 ```
 
-Port `8443`, auto-restart, event ring mounted read-only. Custom port: edit `docker-compose.yml` command to `--server-addr 0.0.0.0:9090`.
+Port `8443`, auto-restart, event ring mounted read-only. The Docker container binds `0.0.0.0` (required for Docker networking); native builds default to `127.0.0.1`. Custom port: edit `docker-compose.yml` command to `--server-addr 0.0.0.0:9090`.
 
 ## Native Build
 
@@ -27,7 +27,7 @@ cd gateway && ./build.sh --run
 Custom event ring path:
 
 ```bash
-cargo run --release --bin gateway -- --event-ring-path /path/to/ring --server-addr 0.0.0.0:8443
+cargo run --release --bin gateway -- --event-ring-path /path/to/ring --server-addr 127.0.0.1:8443
 ```
 
 ## Configuration
@@ -36,7 +36,7 @@ cargo run --release --bin gateway -- --event-ring-path /path/to/ring --server-ad
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--server-addr` | `0.0.0.0:8443` | Listen address |
+| `--server-addr` | `127.0.0.1:8443` | Listen address (use `0.0.0.0` inside Docker) |
 | `--event-ring-path` | `/var/lib/hugetlbfs/.../monad-exec-events` | Path to event ring |
 | `--heartbeat-interval` | `30` | Seconds between server Ping frames |
 | `--heartbeat-timeout` | `60` | Seconds without client activity before disconnect |
@@ -67,7 +67,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=/opt/monode/gateway/target/release/gateway \
-  --server-addr 0.0.0.0:8443 \
+  --server-addr 127.0.0.1:8443 \
   --heartbeat-interval 30 \
   --heartbeat-timeout 60
 Restart=always

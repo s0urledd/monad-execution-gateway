@@ -2,7 +2,7 @@
 
 ## Endpoints
 
-All endpoints are served on a single port (default `8443`).
+All endpoints are served on a single port (default `127.0.0.1:8443` — localhost only). Docker containers bind `0.0.0.0:8443` as required by container networking.
 
 ### WebSocket Channels
 
@@ -67,7 +67,7 @@ Sent as the **first frame** after every connect. Declares server identity, featu
   "Hello": {
     "wire_version": 1,
     "server_version": "0.1.0",
-    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter"],
+    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter", "backpressure_notify"],
     "limits": {
       "resume_buffer_size": 100000,
       "client_send_buffer": 4096,
@@ -120,7 +120,7 @@ If `your_cursor >= oldest_seqno`, resume will succeed. Otherwise you'll get a sn
 Each WebSocket client gets a bounded send buffer of **4096 messages**. When the buffer is full (client consuming too slowly):
 
 - New messages are **dropped** (not queued)
-- Warning logged every 1,000 drops
+- Every 1,000 drops: warning logged server-side and a `Warning` frame sent to the client (best-effort, see [Warning](#warning) below)
 - Client **disconnected** after 10,000 cumulative drops
 
 On disconnect, the server logs `sent` and `dropped` counts. This prevents a single slow consumer from exhausting server memory.
@@ -136,7 +136,7 @@ ws://<GATEWAY_HOST>:8443/v1/ws
 ws://<GATEWAY_HOST>:8443/v1/ws?resume_from=12345
 ```
 
-No authentication required. Once connected, the server sends a `Hello` frame (server identity, features, operational limits), then a `Resume` control frame, then live data.
+No authentication required (localhost-only by default). Once connected, the server sends a `Hello` frame (server identity, features, operational limits), then a `Resume` control frame, then live data.
 
 ### Channel Details
 
@@ -327,6 +327,27 @@ Block stage transition through MonadBFT consensus.
 | `Finalized` | Committed to canonical chain (irreversible) | ~800ms |
 | `Verified` | State root verified (terminal) | After finalization |
 | `Rejected` | Dropped at any point (terminal) | Varies |
+
+#### `Warning`
+
+Best-effort backpressure notification. Sent every 1,000 cumulative drops (injected on the next successful send). Signals the client is consuming too slowly.
+
+```json
+{
+  "server_seqno": 0,
+  "Warning": {
+    "type": "backpressure",
+    "dropped": 1000,
+    "drop_limit": 10000
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `type` | Always `"backpressure"` |
+| `dropped` | Cumulative messages dropped for this client |
+| `drop_limit` | Total drops before disconnect (default 10,000) |
 
 ---
 

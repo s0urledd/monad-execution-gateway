@@ -58,7 +58,7 @@ Sent as the **first frame** on every connection. Declares server identity, featu
   "Hello": {
     "wire_version": 1,
     "server_version": "0.1.0",
-    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter"],
+    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter", "backpressure_notify"],
     "limits": {
       "resume_buffer_size": 100000,
       "client_send_buffer": 4096,
@@ -217,6 +217,29 @@ Block stage transition event.
 | `block_age_ms` | `f64` | No | Total milliseconds since Proposed |
 | `txn_count` | `usize` | No | Number of transactions in the block |
 | `gas_used` | `u64` | Yes | Gas used (available after BlockEnd) |
+
+### 3.8 `Warning`
+
+Best-effort notification sent to the client when backpressure drops accumulate. Injected on the next successful send after every 1,000 drops.
+
+```json
+{
+  "server_seqno": 0,
+  "Warning": {
+    "type": "backpressure",
+    "dropped": 1000,
+    "drop_limit": 10000
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `string` | Always `"backpressure"`. |
+| `dropped` | `u64` | Cumulative messages dropped for this client. |
+| `drop_limit` | `u64` | Total drops before the server disconnects the client. |
+
+The `server_seqno` on Warning frames is `0` (control message, not sequenced). Clients should use this as a signal to consume faster or subscribe more narrowly.
 
 ---
 
@@ -401,6 +424,7 @@ Client                                          Server
 
 | Error | Server Behavior |
 |-------|-----------------|
+| Slow client (1K drops) | `Warning` frame sent (best-effort) |
 | Slow client (10K drops) | Server closes connection |
 | Client Pong timeout | Server closes connection |
 | Invalid JSON from client | Message ignored |

@@ -46,7 +46,7 @@ fi
 
 if [[ "${1:-}" == "--run" ]]; then
     shift
-    cargo run --release --bin gateway -- --server-addr 0.0.0.0:8443 "$@"
+    cargo run --release --bin gateway -- --server-addr 127.0.0.1:8443 "$@"
 else
     cargo build --release --bin gateway "$@"
 fi

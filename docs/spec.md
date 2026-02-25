@@ -167,11 +167,21 @@ Broadcast channel ─► Per-client bounded mpsc (4096) ─► WebSocket send ta
 |-----------|--------|
 | Channel has capacity | Message enqueued, `total_sent` incremented |
 | Channel full | Message **dropped**, `drop_count` incremented, `ws_dropped_total` metric incremented |
-| `drop_count` reaches 1,000 (and every 1,000 after) | Warning logged with client ID, drop count, sent count |
+| `drop_count` reaches 1,000 (and every 1,000 after) | Warning logged server-side; `Warning` frame queued for client (best-effort) |
 | `drop_count` reaches 10,000 | Client **disconnected** |
 | Channel receiver closed | Client **disconnected** |
 
-### 4.3 Invariants
+### 4.3 Client-Facing Warning Frame
+
+Every 1,000 cumulative drops, the server injects a `Warning` frame into the client's send channel on the next successful send:
+
+```json
+{"server_seqno": 0, "Warning": {"type": "backpressure", "dropped": 1000, "drop_limit": 10000}}
+```
+
+This is **best-effort** — if the channel is still full when the warning is attempted, it is silently skipped. The `backpressure_notify` feature flag in the `Hello` message advertises this capability.
+
+### 4.4 Invariants
 
 - The broadcast channel itself (1,000,000 capacity) is never the bottleneck. If it fills, the system is critically overloaded.
 - Backpressure is **per-client**. A slow client does not affect other clients.
@@ -224,9 +234,11 @@ On gateway restart:
 
 ---
 
-## 6. Abuse Protection
+## 6. Access Model
 
-The gateway does **not** enforce public abuse limits. It is designed to run in trusted or operator-controlled environments. Deployment-level protections (reverse proxy, firewall, auth) are out of scope.
+The gateway binds to `127.0.0.1` (localhost) by default, meaning it is **not reachable from the network** unless the operator explicitly changes the bind address. This is intentional — the gateway is designed to run co-located with the Monad validator and serve local consumers (SDKs, webhook relay, monitoring).
+
+If remote access is needed, place the gateway behind a reverse proxy (nginx, Caddy, etc.) with TLS and authentication. The gateway itself does not enforce rate limits, authentication, or IP allowlists — these are the responsibility of the deployment layer.
 
 ---
 
@@ -303,7 +315,7 @@ On WebSocket connect, the server sends a `Hello` control message as the **first 
   "Hello": {
     "wire_version": 1,
     "server_version": "0.1.0",
-    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter"],
+    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter", "backpressure_notify"],
     "limits": {
       "resume_buffer_size": 100000,
       "client_send_buffer": 4096,

@@ -17,7 +17,7 @@ pub struct Cli {
     #[arg(long)]
     event_ring_path: Option<PathBuf>,
 
-    #[arg(short, long, default_value = "0.0.0.0:8443")]
+    #[arg(short, long, default_value = "127.0.0.1:8443")]
     server_addr: String,
 
     /// Seconds between server-initiated WebSocket Ping frames.

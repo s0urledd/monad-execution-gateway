@@ -1,5 +1,12 @@
 # Monad Execution Events Gateway
 
+![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
+![WebSocket](https://img.shields.io/badge/WebSocket-010101?logo=socketdotio&logoColor=white)
+![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?logo=prometheus&logoColor=white)
+
 Real-time execution event streaming from a Monad full node. EVM-internal visibility not available through standard JSON-RPC.
 
 ## Prerequisites
@@ -16,6 +23,9 @@ cd monad-execution-gateway
 
 # Docker (recommended)
 docker compose up -d
+
+# With monitoring (Prometheus + Grafana)
+docker compose -f docker-compose.monitoring.yml up -d
 
 # Native
 cd gateway && ./build.sh --run
@@ -121,11 +131,13 @@ Every message carries a monotonic `server_seqno`. On reconnect, pass `?resume_fr
 
 ```
 Connect:    ws://host:8443/v1/ws
+            <- {"server_seqno":0, "Hello":{"wire_version":1, "features":[...], ...}}
             <- {"server_seqno":0, "Resume":{"mode":"snapshot"}}
             <- {"server_seqno":5, "Events":[...]}
             ...disconnect at seqno 42...
 
 Reconnect:  ws://host:8443/v1/ws?resume_from=42
+            <- {"server_seqno":0, "Hello":{"wire_version":1, "features":[...], ...}}
             <- {"server_seqno":42, "Resume":{"mode":"resume"}}
             <- {"server_seqno":43, ...}  // picks up where you left off
 ```
