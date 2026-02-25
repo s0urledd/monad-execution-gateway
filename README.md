@@ -1,12 +1,19 @@
 # Monad Execution Events Gateway
 
+![Rust](https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)
+![WebSocket](https://img.shields.io/badge/WebSocket-010101?style=flat&logo=socketdotio&logoColor=white)
+![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=flat&logo=prometheus&logoColor=white)
+
 Real-time execution event streaming from a Monad full node. EVM-internal visibility not available through standard JSON-RPC.
 
 ---
 
 ## What is this?
 
-A standalone WebSocket gateway that reads raw execution events directly from a Monad validator's shared-memory ring buffer and streams them to clients in real time. It runs as a sidecar next to a Monad full node — no RPC calls, no polling, no middleware.
+A standalone WebSocket gateway that reads raw execution events directly from a Monad validator's shared-memory ring buffer and streams them to local clients in real time. It runs as a sidecar next to a Monad full node — no RPC calls, no polling, no middleware.
 
 The validator writes events to an mmap'd hugepage ring buffer. This gateway reads that ring at microsecond granularity, enriches each event with consensus stage metadata, and fans them out over WebSocket channels with per-client filtering, backpressure management, and a lossless resume protocol.
 
@@ -41,7 +48,7 @@ Plus computed metrics: **TPS** (rolling window), **Top-K accessed accounts/slots
 
 JSON-RPC is designed for querying settled state. This gateway streams execution **as it happens**, before the block even reaches consensus.
 
-### vs Monade (Monad Node RPC)
+### vs Monad Node RPC
 
 Monad nodes expose an Ethereum-compatible JSON-RPC interface. The execution event ring is a low-level internal data path that the node itself does not expose over the network.
 
@@ -63,15 +70,20 @@ They are complementary. RPC for reads and writes; this gateway for observability
 - **Block explorers / dashboards** — Block lifecycle timing (proposal-to-finality in ms), TPS metrics, parallel efficiency scores — all push-based.
 - **Protocol developers** — Contention analytics reveal which contracts and storage slots cause re-execution in Monad's parallel execution engine.
 - **Infrastructure operators** — Health checks, Prometheus metrics (50+ counters/histograms/gauges), degraded-state detection, configurable heartbeat.
-- **Wallet / DApp backends** — Subscribe to specific addresses or log topics with field-level filters. Only receive finalized events with `min_stage`.
 
 ---
 
 ## Quick Start
 
 ```bash
+git clone https://github.com/s0urledd/monad-execution-gateway.git
+cd monad-execution-gateway
+
 # Docker (recommended)
 docker compose up -d
+
+# With monitoring (Prometheus + Grafana)
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 
 # Native
 cd gateway && ./build.sh --run
@@ -83,6 +95,8 @@ Connect:
 websocat ws://localhost:8443/v1/ws/lifecycle
 curl http://localhost:8443/v1/status
 ```
+
+When running with monitoring, Grafana is available at `http://localhost:3000` (admin/admin) and Prometheus at `http://localhost:9090`.
 
 ## Endpoints
 
@@ -98,6 +112,7 @@ curl http://localhost:8443/v1/status
 | `/v1/status` | REST: gateway status |
 | `/v1/blocks/lifecycle` | REST: block lifecycles |
 | `/health` | Health check |
+| `/metrics` | Prometheus metrics |
 
 All WebSocket endpoints accept `?resume_from=<server_seqno>` for lossless reconnect.
 
@@ -165,13 +180,15 @@ node webhook-relay/dist/index.js
 Every message carries a monotonic `server_seqno`. On reconnect, pass `?resume_from=<seqno>` to replay missed messages from a 100K-entry ring buffer. SDKs handle this automatically.
 
 ```
-Connect:    ws://host:8443/v1/ws
+Connect:    ws://localhost:8443/v1/ws
+            <- {"server_seqno":0, "Hello":{...}}
             <- {"server_seqno":0, "Resume":{"mode":"snapshot"}}
             <- {"server_seqno":5, "Events":[...]}
             ...disconnect at seqno 42...
 
-Reconnect:  ws://host:8443/v1/ws?resume_from=42
-            <- {"server_seqno":42, "Resume":{"mode":"resume"}}
+Reconnect:  ws://localhost:8443/v1/ws?resume_from=42
+            <- {"server_seqno":0, "Hello":{...}}
+            <- {"server_seqno":0, "Resume":{"mode":"resume"}}
             <- {"server_seqno":43, ...}  // picks up where you left off
 ```
 
@@ -183,7 +200,7 @@ Reconnect:  ws://host:8443/v1/ws?resume_from=42
 - [SLO Definitions](docs/slo.md) — observed performance baselines with reference hardware
 - [API Reference](docs/API.md) — endpoint catalog, subscription protocol
 - [Events Reference](docs/EVENTS.md) — all event types with field descriptions
-- [Deployment](docs/DEPLOYMENT.md) — Docker, native build, systemd
+- [Deployment](docs/DEPLOYMENT.md) — Docker, native build, systemd, monitoring
 
 ## License
 

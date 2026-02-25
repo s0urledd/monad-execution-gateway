@@ -290,7 +290,8 @@ Broadcast ──────►│  Per-client bounded channel       │──�
                  ┌──────────────────────────────────┐
                  │  DROP message + increment counter │
                  │                                   │
-                 │  Every 1,000 drops: log warning   │
+                 │  Every 1,000 drops: send Warning  │
+                 │  frame to client + log server-side│
                  │  After 10,000 drops: DISCONNECT   │
                  └──────────────────────────────────┘
 ```
@@ -301,7 +302,7 @@ Broadcast ──────►│  Per-client bounded channel       │──�
 |-----------|-------|---------|
 | `CLIENT_SEND_BUFFER` | 4,096 | Per-client channel capacity |
 | `SLOW_CLIENT_DROP_LIMIT` | 10,000 | Cumulative drops before disconnect |
-| Warning interval | Every 1,000 drops | Logged server-side |
+| Warning interval | Every 1,000 drops | `Warning` frame sent to client (best-effort) |
 
 ### What Clients Should Do
 
@@ -339,7 +340,7 @@ On every WebSocket connect, the server sends a `Hello` control message as the **
   "Hello": {
     "wire_version": 1,
     "server_version": "0.1.0",
-    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter"],
+    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter", "backpressure_notify"],
     "limits": {
       "resume_buffer_size": 100000,
       "client_send_buffer": 4096,

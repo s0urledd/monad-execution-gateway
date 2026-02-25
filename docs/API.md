@@ -67,7 +67,7 @@ Sent as the **first frame** after every connect. Declares server identity, featu
   "Hello": {
     "wire_version": 1,
     "server_version": "0.1.0",
-    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter"],
+    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter", "backpressure_notify"],
     "limits": {
       "resume_buffer_size": 100000,
       "client_send_buffer": 4096,
@@ -120,8 +120,14 @@ If `your_cursor >= oldest_seqno`, resume will succeed. Otherwise you'll get a sn
 Each WebSocket client gets a bounded send buffer of **4096 messages**. When the buffer is full (client consuming too slowly):
 
 - New messages are **dropped** (not queued)
-- Warning logged every 1,000 drops
+- Every 1,000 drops: server sends a `Warning` frame to the client (best-effort)
 - Client **disconnected** after 10,000 cumulative drops
+
+The `Warning` frame notifies the client that messages are being dropped:
+
+```json
+{"server_seqno": 0, "Warning": {"type": "backpressure", "dropped": 1000, "drop_limit": 10000}}
+```
 
 On disconnect, the server logs `sent` and `dropped` counts. This prevents a single slow consumer from exhausting server memory.
 
@@ -136,7 +142,7 @@ ws://<GATEWAY_HOST>:8443/v1/ws
 ws://<GATEWAY_HOST>:8443/v1/ws?resume_from=12345
 ```
 
-No authentication required. Once connected, the server sends a `Hello` frame (server identity, features, operational limits), then a `Resume` control frame, then live data.
+The gateway listens on localhost by default. Once connected, the server sends a `Hello` frame (server identity, features, operational limits), then a `Resume` control frame, then live data.
 
 ### Channel Details
 
@@ -327,6 +333,20 @@ Block stage transition through MonadBFT consensus.
 | `Finalized` | Committed to canonical chain (irreversible) | ~800ms |
 | `Verified` | State root verified (terminal) | After finalization |
 | `Rejected` | Dropped at any point (terminal) | Varies |
+
+#### `Warning`
+
+Server-to-client backpressure notification. Sent (best-effort) every 1,000 dropped messages when the client's send buffer is full.
+
+```json
+{"server_seqno": 0, "Warning": {"type": "backpressure", "dropped": 2000, "drop_limit": 10000}}
+```
+
+| Field | Description |
+|-------|-------------|
+| `type` | Always `"backpressure"` |
+| `dropped` | Total messages dropped for this client |
+| `drop_limit` | Disconnect threshold (default 10,000) |
 
 ---
 

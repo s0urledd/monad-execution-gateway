@@ -62,6 +62,17 @@ pub enum ServerMessage {
     /// Control message sent after Hello on connect.
     /// `mode` is `"resume"` (cursor hit) or `"snapshot"` (full state replay).
     Resume(ResumeMode),
+    /// Server-to-client backpressure warning. Sent when the server has dropped
+    /// messages because the client is consuming too slowly.
+    Warning(BackpressureWarning),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackpressureWarning {
+    #[serde(rename = "type")]
+    pub warning_type: String,
+    pub dropped: u64,
+    pub drop_limit: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -606,18 +617,36 @@ async fn handle_ws(
         let _ = ws_sender.close().await;
     });
 
-    // Helper: try_send with backpressure tracking
+    // Helper: try_send with backpressure tracking + client notification
     let mut drop_count: u64 = 0;
     let mut total_sent: u64 = 0;
+    let mut last_warned_drops: u64 = 0;
     let mut send_or_drop = |client_tx: &mpsc::Sender<String>,
                             json: String,
                             client_id: usize,
                             drop_count: &mut u64,
-                            total_sent: &mut u64|
+                            total_sent: &mut u64,
+                            last_warned: &mut u64|
      -> bool {
         match client_tx.try_send(json) {
             Ok(_) => {
                 *total_sent += 1;
+                // After a successful send, notify client if drops occurred since last warning
+                if *drop_count > 0 && *drop_count >= *last_warned + 1000 {
+                    let warning = ServerMessage::Warning(BackpressureWarning {
+                        warning_type: "backpressure".into(),
+                        dropped: *drop_count,
+                        drop_limit: SLOW_CLIENT_DROP_LIMIT,
+                    });
+                    let wire = WireMessage {
+                        server_seqno: 0,
+                        message: &warning,
+                    };
+                    if let Ok(wjson) = serde_json::to_string(&wire) {
+                        let _ = client_tx.try_send(wjson); // best-effort
+                    }
+                    *last_warned = *drop_count;
+                }
                 true
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -656,6 +685,7 @@ async fn handle_ws(
                     client_id,
                     &mut drop_count,
                     &mut total_sent,
+                    &mut last_warned_drops,
                 ) {
                     state.connected_clients.fetch_sub(1, Ordering::Relaxed);
                     metrics::WS_ACTIVE_CONNECTIONS.dec();
@@ -673,7 +703,8 @@ async fn handle_ws(
                          channel: &Channel,
                          client_id: usize,
                          drop_count: &mut u64,
-                         total_sent: &mut u64|
+                         total_sent: &mut u64,
+                         last_warned: &mut u64|
      -> bool {
         let replay_msgs = build_replay(channel, state);
         let current_seqno = state.server_seqno.load(Ordering::Relaxed);
@@ -683,7 +714,7 @@ async fn handle_ws(
                 message: msg,
             };
             if let Ok(json) = serde_json::to_string(&wire) {
-                if !send_or_drop(client_tx, json, client_id, drop_count, total_sent) {
+                if !send_or_drop(client_tx, json, client_id, drop_count, total_sent, last_warned) {
                     return false;
                 }
             }
@@ -708,6 +739,7 @@ async fn handle_ws(
             "resume".into(),
             "heartbeat".into(),
             "stage_filter".into(),
+            "backpressure_notify".into(),
         ],
         limits: HelloLimits {
             resume_buffer_size: MAX_EVENT_HISTORY,
@@ -754,6 +786,7 @@ async fn handle_ws(
                 client_id,
                 &mut drop_count,
                 &mut total_sent,
+                &mut last_warned_drops,
             ) {
                 state.connected_clients.fetch_sub(1, Ordering::Relaxed);
                 metrics::WS_ACTIVE_CONNECTIONS.dec();
@@ -776,6 +809,7 @@ async fn handle_ws(
                     client_id,
                     &mut drop_count,
                     &mut total_sent,
+                    &mut last_warned_drops,
                 ) {
                     state.connected_clients.fetch_sub(1, Ordering::Relaxed);
                     metrics::WS_ACTIVE_CONNECTIONS.dec();
@@ -803,6 +837,7 @@ async fn handle_ws(
             client_id,
             &mut drop_count,
             &mut total_sent,
+            &mut last_warned_drops,
         ) {
             state.connected_clients.fetch_sub(1, Ordering::Relaxed);
             metrics::WS_ACTIVE_CONNECTIONS.dec();
@@ -849,7 +884,7 @@ async fn handle_ws(
                             let msg = ServerMessage::Events(std::mem::take(&mut events_buf));
                             let wire = WireMessage { server_seqno: batch_seqno, message: &msg };
                             if let Ok(json) = serde_json::to_string(&wire) {
-                                if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
+                                if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent, &mut last_warned_drops) {
                                     break;
                                 }
                             }
@@ -859,7 +894,7 @@ async fn handle_ws(
                         for (seqno, msg) in std::mem::take(&mut messages_buf) {
                             let wire = WireMessage { server_seqno: seqno, message: &msg };
                             if let Ok(json) = serde_json::to_string(&wire) {
-                                if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent) {
+                                if !send_or_drop(&client_tx, json, client_id, &mut drop_count, &mut total_sent, &mut last_warned_drops) {
                                     break;
                                 }
                             }
@@ -1436,7 +1471,7 @@ pub async fn run_server(
     info!("  Metrics:    http://{}/metrics", addr);
     info!("  Health:     http://{}/health", addr);
     info!("  Heartbeat:  ping {}s / timeout {}s", config.heartbeat_interval_secs, config.heartbeat_timeout_secs);
-    info!("  Mode:       no rate limits (trusted environment)");
+    info!("  Mode:       local (no rate limits)");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(

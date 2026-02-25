@@ -224,9 +224,9 @@ On gateway restart:
 
 ---
 
-## 6. Abuse Protection
+## 6. Access Model
 
-The gateway does **not** enforce public abuse limits. It is designed to run in trusted or operator-controlled environments. Deployment-level protections (reverse proxy, firewall, auth) are out of scope.
+The gateway listens on `127.0.0.1` by default and is intended for local use on the same machine as the Monad validator. No authentication, rate limiting, or access control is implemented.
 
 ---
 
@@ -303,7 +303,7 @@ On WebSocket connect, the server sends a `Hello` control message as the **first 
   "Hello": {
     "wire_version": 1,
     "server_version": "0.1.0",
-    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter"],
+    "features": ["lifecycle", "contention", "resume", "heartbeat", "stage_filter", "backpressure_notify"],
     "limits": {
       "resume_buffer_size": 100000,
       "client_send_buffer": 4096,
