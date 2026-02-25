@@ -166,6 +166,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(ServerMessage::TPS(tps)) => {
                                 info!("Received TPS: {}", tps);
                             }
+                            Ok(ServerMessage::ContentionData(contention)) => {
+                                info!("Received contention data for block {}", contention.block_number);
+                            }
+                            Ok(ServerMessage::Lifecycle(lifecycle)) => {
+                                info!("Received lifecycle update: block {} -> {:?}", lifecycle.block_number, lifecycle.to_stage);
+                            }
+                            Ok(ServerMessage::Hello(hello)) => {
+                                info!("Received Hello: wire_version={}, server_version={}", hello.wire_version, hello.server_version);
+                            }
+                            Ok(ServerMessage::Resume(resume)) => {
+                                info!("Received Resume: mode={}", resume.mode);
+                            }
                             Err(_) => {
                                 error!("Failed to parse events: {}", text);
                             }
