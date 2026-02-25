@@ -26,3 +26,33 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # --- Monitoring (optional) ---
+  # Start with: docker compose --profile monitoring up -d
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: gateway-prometheus
+    profiles: ["monitoring"]
+    network_mode: host
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: gateway-grafana
+    profiles: ["monitoring"]
+    network_mode: host
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:
