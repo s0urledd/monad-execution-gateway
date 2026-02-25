@@ -219,6 +219,12 @@ pub struct BlockLifecycleTracker {
     max_completed: usize,
 }
 
+impl Default for BlockLifecycleTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockLifecycleTracker {
     pub fn new() -> Self {
         Self {

@@ -42,7 +42,7 @@ pub struct TopAccessesData {
 
 #[derive(Debug, Clone)]
 pub enum EventDataOrMetrics {
-    Event(EventData),
+    Event(Box<EventData>),
     TopAccesses(TopAccessesData),
     TPS(usize),
     Contention(ContentionData),
@@ -624,7 +624,7 @@ async fn handle_ws(
             Err(mpsc::error::TrySendError::Full(_)) => {
                 *drop_count += 1;
                 metrics::WS_DROPPED_TOTAL.inc();
-                if *drop_count % 1000 == 0 {
+                if (*drop_count).is_multiple_of(1000) {
                     warn!(
                         "client-{}: backpressure — dropped {} messages (sent {})",
                         client_id, drop_count, total_sent
@@ -882,7 +882,7 @@ async fn handle_ws(
                         match parse_client_message(&text) {
                             Some(ClientMessage::Hello { hello }) => {
                                 let client_wire = hello.wire_version.unwrap_or(0);
-                                if client_wire != WIRE_VERSION as u32 {
+                                if client_wire != WIRE_VERSION {
                                     warn!(
                                         "client-{}: wire_version mismatch (client={}, server={})",
                                         client_id, client_wire, WIRE_VERSION
@@ -1307,7 +1307,7 @@ async fn run_event_forwarder(
                 };
 
                 let send_accesses = event_data.event_name == EventName::BlockEnd;
-                broadcast_item(EventDataOrMetrics::Event(event_data), &state, &event_broadcast);
+                broadcast_item(EventDataOrMetrics::Event(Box::new(event_data)), &state, &event_broadcast);
 
                 if send_accesses {
                     broadcast_item(EventDataOrMetrics::TopAccesses(TopAccessesData {
