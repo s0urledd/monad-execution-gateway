@@ -2,9 +2,18 @@
 
 Real-time execution event streaming from a Monad full node. EVM-internal visibility not available through standard JSON-RPC.
 
+## Prerequisites
+
+- A running **Monad full node** with the Execution Events SDK enabled
+- The node's event ring mounted at `/var/lib/hugetlbfs/user/monad/pagesize-2MB/event-rings/`
+- The gateway must run on the **same machine** as the node (shared memory access)
+
 ## Quick Start
 
 ```bash
+git clone https://github.com/s0urledd/monad-execution-gateway.git
+cd monad-execution-gateway
+
 # Docker (recommended)
 docker compose up -d
 
@@ -18,6 +27,16 @@ Connect:
 websocat ws://localhost:8443/v1/ws/lifecycle
 curl http://localhost:8443/v1/status
 ```
+
+## Docs
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [API Reference](docs/API.md)
+- [Events Reference](docs/EVENTS.md)
+- [Wire Protocol](docs/wire.md)
+- [Behavioral Spec](docs/spec.md)
+- [Deployment](docs/DEPLOYMENT.md)
+- [SLO Definitions](docs/slo.md)
 
 ## Endpoints
 
@@ -33,6 +52,7 @@ curl http://localhost:8443/v1/status
 | `/v1/status` | REST: gateway status |
 | `/v1/blocks/lifecycle` | REST: block lifecycles |
 | `/health` | Health check |
+| `/metrics` | Prometheus metrics |
 
 All WebSocket endpoints accept `?resume_from=<server_seqno>` for lossless reconnect.
 
@@ -109,16 +129,6 @@ Reconnect:  ws://host:8443/v1/ws?resume_from=42
             <- {"server_seqno":42, "Resume":{"mode":"resume"}}
             <- {"server_seqno":43, ...}  // picks up where you left off
 ```
-
-## Docs
-
-- [Architecture](docs/ARCHITECTURE.md) 
-- [Wire Protocol](docs/wire.md)
-- [Behavioral Spec](docs/spec.md)
-- [SLO Definitions](docs/slo.md)
-- [API Reference](docs/API.md)
-- [Events Reference](docs/EVENTS.md)
-- [Deployment](docs/DEPLOYMENT.md)
 
 ## License
 

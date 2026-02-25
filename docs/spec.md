@@ -183,7 +183,7 @@ Broadcast channel ─► Per-client bounded mpsc (4096) ─► WebSocket send ta
 
 ### 5.1 Resume Protocol
 
-On every WebSocket connect, the server sends a `Resume` control message as the **first frame**:
+On every WebSocket connect, the server sends a `Resume` control message as the **second frame** (after `Hello`):
 
 ```json
 {"server_seqno": <current>, "Resume": {"mode": "<resume|snapshot>"}}
