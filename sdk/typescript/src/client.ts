@@ -10,7 +10,9 @@ import type {
   BlockLifecycleUpdate,
   BlockLifecycleSummary,
   BlockStage,
+  HelloData,
   ResumeMode,
+  BackpressureWarning,
   Channel,
   SimpleSubscribe,
   AdvancedSubscribe,
@@ -233,7 +235,9 @@ export class GatewayClient {
    * - `"contention"` — Per-block contention analytics
    * - `"topAccesses"` — Top accessed accounts and storage slots
    * - `"lifecycle"` — Block stage transition
-   * - `"resume"` — Resume ACK from server (first frame)
+   * - `"hello"` — Server Hello handshake (first frame)
+   * - `"resume"` — Resume ACK from server (second frame)
+   * - `"warning"` — Backpressure warning (every 1,000 drops)
    * - `"connected"` / `"disconnected"` / `"reconnecting"` — Connection state
    * - `"error"` — WebSocket errors
    */
@@ -409,13 +413,19 @@ export class GatewayClient {
   }
 
   private handleMessage(msg: ServerMessage): void {
-    // Track cursor position for resume-on-reconnect
-    if (msg.server_seqno !== undefined) {
+    // Track cursor position for resume-on-reconnect.
+    // Control frames (Hello, Warning, Resume) use server_seqno=0 —
+    // never update the cursor from those or it will corrupt resume_from.
+    if (msg.server_seqno > 0) {
       this.lastServerSeqno = msg.server_seqno;
     }
 
-    if ("Resume" in msg) {
+    if ("Hello" in msg) {
+      this.emit("hello", msg.Hello);
+    } else if ("Resume" in msg) {
       this.emit("resume", msg.Resume);
+    } else if ("Warning" in msg) {
+      this.emit("warning", msg.Warning);
     } else if ("Events" in msg) {
       this.emit("events", msg.Events);
       for (const event of msg.Events) {

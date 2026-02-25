@@ -154,12 +154,50 @@ class ContentionData:
 
 
 @dataclass
+class HelloData:
+    """Hello handshake — first frame on every WebSocket connect."""
+
+    wire_version: int
+    server_version: str
+    features: list[str]
+    limits: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> HelloData:
+        return cls(
+            wire_version=d["wire_version"],
+            server_version=d["server_version"],
+            features=d.get("features", []),
+            limits=d.get("limits", {}),
+        )
+
+
+@dataclass
 class ResumeMode:
+    """Resume ACK — second frame after connect (after Hello)."""
+
     mode: Literal["resume", "snapshot"]
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ResumeMode:
         return cls(mode=d["mode"])
+
+
+@dataclass
+class BackpressureWarning:
+    """Warning sent every 1,000 dropped messages due to backpressure."""
+
+    type: str
+    dropped: int
+    drop_limit: int
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> BackpressureWarning:
+        return cls(
+            type=d.get("type", "backpressure"),
+            dropped=d["dropped"],
+            drop_limit=d["drop_limit"],
+        )
 
 
 @dataclass
@@ -171,13 +209,21 @@ class ServerMessage:
     tps: int | None = None
     contention: ContentionData | None = None
     lifecycle: BlockLifecycleUpdate | None = None
+    hello: HelloData | None = None
     resume: ResumeMode | None = None
+    warning: BackpressureWarning | None = None
     top_accesses: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ServerMessage:
         msg = cls(server_seqno=d.get("server_seqno", 0))
-        if "Events" in d:
+        if "Hello" in d:
+            msg.hello = HelloData.from_dict(d["Hello"])
+        elif "Resume" in d:
+            msg.resume = ResumeMode.from_dict(d["Resume"])
+        elif "Warning" in d:
+            msg.warning = BackpressureWarning.from_dict(d["Warning"])
+        elif "Events" in d:
             msg.events = [ExecEvent.from_dict(e) for e in d["Events"]]
         elif "TPS" in d:
             msg.tps = d["TPS"]
@@ -185,8 +231,6 @@ class ServerMessage:
             msg.contention = ContentionData.from_dict(d["ContentionData"])
         elif "Lifecycle" in d:
             msg.lifecycle = BlockLifecycleUpdate.from_dict(d["Lifecycle"])
-        elif "Resume" in d:
-            msg.resume = ResumeMode.from_dict(d["Resume"])
         elif "TopAccesses" in d:
             msg.top_accesses = d["TopAccesses"]
         return msg

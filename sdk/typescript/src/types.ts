@@ -336,12 +336,40 @@ export interface ContentionData {
 // ─── Server Messages ────────────────────────────────────────────────
 
 /**
- * Resume control message sent as the first frame after connect/reconnect.
+ * Hello handshake sent as the **first** frame on every WebSocket connect.
+ * One-way declaration — no negotiation required.
+ */
+export interface HelloData {
+  wire_version: number;
+  server_version: string;
+  features: string[];
+  limits: {
+    resume_buffer_size: number;
+    client_send_buffer: number;
+    slow_client_drop_limit: number;
+    heartbeat_interval_secs: number;
+    heartbeat_timeout_secs: number;
+  };
+}
+
+/**
+ * Resume control message sent as the **second** frame after connect/reconnect
+ * (immediately after Hello).
  * `mode` is `"resume"` when the cursor was valid (buffered replay) or
  * `"snapshot"` when the cursor was too old or on fresh connect.
  */
 export interface ResumeMode {
   mode: "resume" | "snapshot";
+}
+
+/**
+ * Backpressure warning sent by the server every 1,000 dropped messages.
+ * Always has `server_seqno: 0` (control frame, not a data message).
+ */
+export interface BackpressureWarning {
+  type: "backpressure";
+  dropped: number;
+  drop_limit: number;
 }
 
 /**
@@ -359,6 +387,8 @@ export type ServerMessage = {
   | { ContentionData: ContentionData }
   | { Lifecycle: BlockLifecycleUpdate }
   | { Resume: ResumeMode }
+  | { Hello: HelloData }
+  | { Warning: BackpressureWarning }
 );
 
 // ─── Channels ───────────────────────────────────────────────────────
@@ -484,8 +514,12 @@ export interface GatewayClientEvents {
   contention: (data: ContentionData) => void;
   topAccesses: (data: TopAccessesData) => void;
   lifecycle: (update: BlockLifecycleUpdate) => void;
-  /** Emitted as the first frame after connect/reconnect with the resume mode */
+  /** Emitted as the first frame on every connect — server capability declaration */
+  hello: (data: HelloData) => void;
+  /** Emitted as the second frame after connect/reconnect with the resume mode */
   resume: (info: ResumeMode) => void;
+  /** Emitted when the server warns about backpressure (every 1,000 drops) */
+  warning: (warning: BackpressureWarning) => void;
   connected: () => void;
   disconnected: () => void;
   reconnecting: (attempt: number, delayMs: number) => void;

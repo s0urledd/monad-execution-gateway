@@ -6,7 +6,9 @@ from .types import (
     ExecEvent,
     BlockLifecycleUpdate,
     ContentionData,
+    HelloData,
     ResumeMode,
+    BackpressureWarning,
     ServerMessage,
     GatewayClientOptions,
 )
@@ -19,7 +21,9 @@ __all__ = [
     "ExecEvent",
     "BlockLifecycleUpdate",
     "ContentionData",
+    "HelloData",
     "ResumeMode",
+    "BackpressureWarning",
     "ServerMessage",
     "GatewayClientOptions",
 ]

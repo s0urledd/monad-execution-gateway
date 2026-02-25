@@ -27,8 +27,10 @@ export type {
   BlockStage,
   BlockLifecycleUpdate,
   BlockLifecycleSummary,
-  // Resume control
+  // Connection control
+  HelloData,
   ResumeMode,
+  BackpressureWarning,
   // Metrics
   ContentionData,
   ContendedSlotEntry,
