@@ -82,9 +82,11 @@ class GatewayClient:
             def handle(update):
                 print(update.block_number)
         """
+
         def decorator(fn: EventCallback) -> EventCallback:
             self._listeners[event].append(fn)
             return fn
+
         return decorator
 
     def add_listener(self, event: str, callback: EventCallback) -> None:
