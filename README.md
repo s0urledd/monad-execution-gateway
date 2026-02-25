@@ -138,7 +138,7 @@ Connect:    ws://host:8443/v1/ws
 
 Reconnect:  ws://host:8443/v1/ws?resume_from=42
             <- {"server_seqno":0, "Hello":{"wire_version":1, "features":[...], ...}}
-            <- {"server_seqno":42, "Resume":{"mode":"resume"}}
+            <- {"server_seqno":0, "Resume":{"mode":"resume"}}
             <- {"server_seqno":43, ...}  // picks up where you left off
 ```
 

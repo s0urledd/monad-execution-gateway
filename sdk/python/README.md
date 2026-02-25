@@ -46,7 +46,7 @@ asyncio.run(main())
 - Cursor resume (tracks `server_seqno`, reconnects with `?resume_from`)
 - Resume ACK validation via `await client.wait_for_resume(timeout)`
 - Heartbeat detection — reconnects on silence
-- REST helpers: `fetch_tps`, `fetch_status`, `fetch_contention`, `fetch_lifecycle`
+- REST helpers: `fetch_tps`, `fetch_status`, `fetch_contention`, `fetch_lifecycle`, `fetch_block_lifecycle`
 
 ## License
 

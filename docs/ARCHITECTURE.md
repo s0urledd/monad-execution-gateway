@@ -191,7 +191,7 @@ The `min_stage` subscription option gates event delivery:
 ```
 
 With `min_stage: "Finalized"`:
-- Events from Proposed/Voted blocks → **held back**
+- Events from Proposed/Voted blocks → **dropped** (not buffered)
 - Events from Finalized/Verified blocks → **delivered immediately**
 - Events from Rejected blocks → **never delivered**
 
