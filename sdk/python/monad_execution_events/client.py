@@ -62,7 +62,7 @@ class GatewayClient:
 
     def __init__(self, options: GatewayClientOptions) -> None:
         self._opts = options
-        self._ws: websockets.WebSocketClientProtocol | None = None
+        self._ws: Any = None
         self._last_seqno: int | None = None
         self._listeners: dict[str, list[EventCallback]] = defaultdict(list)
         self._should_reconnect = True
@@ -82,9 +82,11 @@ class GatewayClient:
             def handle(update):
                 print(update.block_number)
         """
+
         def decorator(fn: EventCallback) -> EventCallback:
             self._listeners[event].append(fn)
             return fn
+
         return decorator
 
     def add_listener(self, event: str, callback: EventCallback) -> None:

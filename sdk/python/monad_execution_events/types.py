@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 # ── Event Names ──────────────────────────────────────────────────────
 
+
 class EventName(str, Enum):
     RecordError = "RecordError"
     BlockStart = "BlockStart"
@@ -43,11 +44,13 @@ class EventName(str, Enum):
 
 # ── Block Stages ─────────────────────────────────────────────────────
 
+
 class BlockStage(str, Enum):
     """MonadBFT consensus stages.
 
     Happy path: Proposed → Voted → Finalized → Verified
     """
+
     Proposed = "Proposed"
     Voted = "Voted"
     Finalized = "Finalized"
@@ -56,6 +59,7 @@ class BlockStage(str, Enum):
 
 
 # ── Channels ─────────────────────────────────────────────────────────
+
 
 class Channel(str, Enum):
     ALL = "all"
@@ -76,9 +80,11 @@ CHANNEL_PATHS: dict[Channel, str] = {
 
 # ── Wire Types ───────────────────────────────────────────────────────
 
+
 @dataclass
 class ExecEvent:
     """Single execution event from the gateway."""
+
     event_name: EventName
     payload: dict[str, Any]
     seqno: int
@@ -159,6 +165,7 @@ class ResumeMode:
 @dataclass
 class ServerMessage:
     """Parsed wire message from the gateway."""
+
     server_seqno: int
     events: list[ExecEvent] | None = None
     tps: int | None = None
@@ -187,9 +194,11 @@ class ServerMessage:
 
 # ── Client Options ───────────────────────────────────────────────────
 
+
 @dataclass
 class GatewayClientOptions:
     """Options for GatewayClient."""
+
     url: str
     channel: Channel = Channel.ALL
     auto_reconnect: bool = True

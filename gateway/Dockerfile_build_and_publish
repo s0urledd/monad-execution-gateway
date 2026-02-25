@@ -30,7 +30,12 @@ WORKDIR /usr/src/app
 COPY . .
 
 # Point bindgen to clang-19's libclang for C23 constexpr support.
+# GCC 12 (Bookworm) does not support C23, so we must use clang-19 as the
+# C compiler.  -Wno-error=atomic-alignment suppresses the 128-bit atomic
+# alignment warning that clang-19 emits with -Werror.
 ENV LLVM_CONFIG_PATH=/usr/bin/llvm-config-19
+ENV CC=clang-19
+ENV CFLAGS="-Wno-error=atomic-alignment"
 
 # Build the binary
 RUN cargo build --release --bin gateway
