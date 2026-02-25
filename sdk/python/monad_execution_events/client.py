@@ -266,10 +266,17 @@ class GatewayClient:
         return url
 
     def _handle_message(self, msg: ServerMessage) -> None:
-        self._last_seqno = msg.server_seqno
+        # Control frames (Hello, Warning, Resume) use server_seqno=0.
+        # Only update cursor from data frames to avoid corrupting resume_from.
+        if msg.server_seqno > 0:
+            self._last_seqno = msg.server_seqno
 
-        if msg.resume:
+        if msg.hello:
+            self._emit("hello", msg.hello)
+        elif msg.resume:
             self._emit("resume", msg.resume)
+        elif msg.warning:
+            self._emit("warning", msg.warning)
         elif msg.events:
             self._emit("events", msg.events)
             for ev in msg.events:
