@@ -85,6 +85,7 @@ impl EventName {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "RECORD_ERROR" => Some(EventName::RecordError),
@@ -284,7 +285,7 @@ pub fn run_event_listener(
                     last_event_timestamp_ns = Some(event.info().record_epoch_nanos);
                     event_count += 1;
 
-                    if event_count % 100 == 0 {
+                    if event_count.is_multiple_of(100) {
                         debug!("Processed {} events", event_count);
                     }
 

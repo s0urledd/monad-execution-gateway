@@ -87,6 +87,12 @@ pub struct ContentionTracker {
     txn_count: u32,
 }
 
+impl Default for ContentionTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ContentionTracker {
     pub fn new() -> Self {
         Self {
@@ -254,7 +260,7 @@ impl ContentionTracker {
         // This indicates execution dependency between the contracts.
         let mut edge_counts: HashMap<(Address, Address), u32> = HashMap::new();
 
-        for (_, contracts) in &self.txn_contracts {
+        for contracts in self.txn_contracts.values() {
             let addrs: Vec<&Address> = contracts.iter().collect();
             for i in 0..addrs.len() {
                 for j in (i + 1)..addrs.len() {

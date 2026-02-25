@@ -42,7 +42,7 @@ pub struct TopAccessesData {
 
 #[derive(Debug, Clone)]
 pub enum EventDataOrMetrics {
-    Event(EventData),
+    Event(Box<EventData>),
     TopAccesses(TopAccessesData),
     TPS(usize),
     Contention(ContentionData),
@@ -117,7 +117,7 @@ const WIRE_VERSION: u32 = 1;
 /// Every broadcast item is tagged with a monotonic server-level seqno.
 /// This seqno is independent of the per-event ring-buffer seqno.
 #[derive(Debug, Clone)]
-struct SequencedItem {
+pub(crate) struct SequencedItem {
     seqno: u64,
     item: EventDataOrMetrics,
 }
@@ -125,7 +125,7 @@ struct SequencedItem {
 /// Ring buffer entry: pre-serialized JSON ready to replay byte-for-byte.
 /// Avoids re-processing and re-serializing on cursor resume.
 #[derive(Clone)]
-struct ReplayEntry {
+pub(crate) struct ReplayEntry {
     seqno: u64,
     json: String,
 }
@@ -357,6 +357,7 @@ struct ClientHello {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ClientMessage {
+    #[allow(dead_code)]
     Subscribe(SubscribeMessage),
     Hello { hello: ClientHello },
 }
@@ -609,7 +610,7 @@ async fn handle_ws(
     // Helper: try_send with backpressure tracking
     let mut drop_count: u64 = 0;
     let mut total_sent: u64 = 0;
-    let mut send_or_drop = |client_tx: &mpsc::Sender<String>,
+    let send_or_drop = |client_tx: &mpsc::Sender<String>,
                             json: String,
                             client_id: usize,
                             drop_count: &mut u64,
@@ -623,7 +624,7 @@ async fn handle_ws(
             Err(mpsc::error::TrySendError::Full(_)) => {
                 *drop_count += 1;
                 metrics::WS_DROPPED_TOTAL.inc();
-                if *drop_count % 1000 == 0 {
+                if (*drop_count).is_multiple_of(1000) {
                     warn!(
                         "client-{}: backpressure — dropped {} messages (sent {})",
                         client_id, drop_count, total_sent
@@ -881,7 +882,7 @@ async fn handle_ws(
                         match parse_client_message(&text) {
                             Some(ClientMessage::Hello { hello }) => {
                                 let client_wire = hello.wire_version.unwrap_or(0);
-                                if client_wire != WIRE_VERSION as u32 {
+                                if client_wire != WIRE_VERSION {
                                     warn!(
                                         "client-{}: wire_version mismatch (client={}, server={})",
                                         client_id, client_wire, WIRE_VERSION
@@ -970,7 +971,7 @@ fn process_item_with_seqno(
 ) {
     match item {
         EventDataOrMetrics::Event(event_data) => {
-            let mut serializable = SerializableEventData::from(event_data);
+            let mut serializable = SerializableEventData::from(event_data.as_ref());
             // Attach commit_stage from lifecycle tracker
             if let Some(block_number) = event_data.block_number {
                 if let Ok(lc) = state.lifecycle_tracker.read() {
@@ -1101,7 +1102,7 @@ async fn rest_metrics() -> impl IntoResponse {
 fn serialize_for_replay(seqno: u64, item: &EventDataOrMetrics, state: &GatewayState) -> String {
     let msg = match item {
         EventDataOrMetrics::Event(event_data) => {
-            let mut serializable = SerializableEventData::from(event_data);
+            let mut serializable = SerializableEventData::from(event_data.as_ref());
             if let Some(block_number) = event_data.block_number {
                 if let Ok(lc) = state.lifecycle_tracker.read() {
                     serializable.commit_stage = lc.current_stage_by_number(block_number);
@@ -1285,7 +1286,7 @@ async fn run_event_forwarder(
                 // ── Broadcast: event first, then metrics ──
                 // Helper closure: assign seqno, pre-serialize for ring buffer, broadcast
                 let publish_start = Instant::now();
-                let mut broadcast_item = |item: EventDataOrMetrics, state: &Arc<GatewayState>, tx: &broadcast::Sender<SequencedItem>| {
+                let broadcast_item = |item: EventDataOrMetrics, state: &Arc<GatewayState>, tx: &broadcast::Sender<SequencedItem>| {
                     let seqno = state.server_seqno.fetch_add(1, Ordering::Relaxed) + 1;
                     // Pre-serialize once for the ring buffer (zero-cost replay)
                     let json = serialize_for_replay(seqno, &item, state);
@@ -1306,7 +1307,7 @@ async fn run_event_forwarder(
                 };
 
                 let send_accesses = event_data.event_name == EventName::BlockEnd;
-                broadcast_item(EventDataOrMetrics::Event(event_data), &state, &event_broadcast);
+                broadcast_item(EventDataOrMetrics::Event(Box::new(event_data)), &state, &event_broadcast);
 
                 if send_accesses {
                     broadcast_item(EventDataOrMetrics::TopAccesses(TopAccessesData {
