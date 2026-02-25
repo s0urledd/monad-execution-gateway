@@ -196,7 +196,7 @@ This is **best-effort** — if the channel is still full when the warning is att
 On every WebSocket connect, the server sends a `Resume` control message as the **second frame** (after `Hello`):
 
 ```json
-{"server_seqno": <current>, "Resume": {"mode": "<resume|snapshot>"}}
+{"server_seqno": 0, "Resume": {"mode": "<resume|snapshot>"}}
 ```
 
 ### 5.2 Resume Decision Logic
