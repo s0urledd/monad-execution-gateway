@@ -62,7 +62,7 @@ class GatewayClient:
 
     def __init__(self, options: GatewayClientOptions) -> None:
         self._opts = options
-        self._ws: websockets.WebSocketClientProtocol | None = None
+        self._ws: Any = None
         self._last_seqno: int | None = None
         self._listeners: dict[str, list[EventCallback]] = defaultdict(list)
         self._should_reconnect = True
