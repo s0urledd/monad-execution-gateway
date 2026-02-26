@@ -255,7 +255,7 @@ scrape_configs:
   - job_name: 'monad-gateway'
     scrape_interval: 10s
     static_configs:
-      - targets: ['gateway:8443']
+      - targets: ['localhost:8443']
     metrics_path: '/metrics'
 ```
 

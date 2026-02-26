@@ -8,6 +8,10 @@ dist/
 # Python
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+.mypy_cache/
+.ruff_cache/
 
 # Environment
 .env
@@ -19,3 +23,6 @@ __pycache__/
 .vscode/
 *.swp
 *.swo
+
+# OS
+.DS_Store
