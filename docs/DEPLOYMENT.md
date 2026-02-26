@@ -18,7 +18,7 @@ Port `8443`, auto-restart, event ring mounted read-only. The Docker container bi
 ```bash
 # Ubuntu 24.04 deps
 wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && sudo ./llvm.sh 19
-sudo apt install -y libclang-19-dev libzstd-dev libhugetlbfs-dev cmake gcc g++
+sudo apt install -y clang-19 libclang-19-dev libzstd-dev libhugetlbfs-dev libbsd-dev cmake gcc g++
 
 # Build & run
 cd gateway && ./build.sh --run

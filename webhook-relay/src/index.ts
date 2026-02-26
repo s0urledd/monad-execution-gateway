@@ -68,7 +68,7 @@ async function deliverWithRetry(
         signal: AbortSignal.timeout(10_000),
       });
 
-      if (res.ok || (res.status >= 200 && res.status < 300)) {
+      if (res.ok) {
         return true;
       }
 
@@ -145,14 +145,22 @@ function connectGateway(): void {
         lastSeqno = seqno;
       }
 
-      // Skip Resume control frames (not forwarded)
+      // Skip control frames (not forwarded to webhooks)
       if ("Resume" in msg) {
         const mode = msg.Resume?.mode ?? "unknown";
         console.log(`[relay] Resume ACK: mode=${mode}`);
         return;
       }
+      if ("Hello" in msg) {
+        console.log(`[relay] Hello: wire_version=${msg.Hello?.wire_version}`);
+        return;
+      }
+      if ("Warning" in msg) {
+        console.warn(`[relay] Backpressure warning: dropped=${msg.Warning?.dropped}`);
+        return;
+      }
 
-      // Forward everything else to webhooks
+      // Forward data messages to webhooks
       fanOut(raw, seqno).catch((err) => {
         console.error("[relay] Fan-out error:", err);
       });

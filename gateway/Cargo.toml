@@ -37,7 +37,6 @@ prometheus = "0.13"
 # Utilities
 chrono = "0.4.34"
 lazy_static = "1.5.0"
-anyhow = "1.0.100"
 
 [dependencies.monad-exec-events]
 git = "https://github.com/category-labs/monad-bft"

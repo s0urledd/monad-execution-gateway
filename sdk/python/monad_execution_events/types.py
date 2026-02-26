@@ -179,7 +179,19 @@ class ContentionData:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ContentionData:
-        return cls(**d)
+        return cls(
+            block_number=d["block_number"],
+            block_wall_time_ns=d["block_wall_time_ns"],
+            total_tx_time_ns=d["total_tx_time_ns"],
+            parallel_efficiency_pct=d["parallel_efficiency_pct"],
+            total_unique_slots=d["total_unique_slots"],
+            contended_slot_count=d["contended_slot_count"],
+            contention_ratio=d["contention_ratio"],
+            total_txn_count=d["total_txn_count"],
+            top_contended_slots=d.get("top_contended_slots", []),
+            top_contended_contracts=d.get("top_contended_contracts", []),
+            contract_edges=d.get("contract_edges", []),
+        )
 
 
 @dataclass

@@ -273,7 +273,7 @@ No explicit shutdown timeout. If clients don't close, the process will eventuall
 | Condition | Response | Side Effect |
 |-----------|----------|-------------|
 | Events received within 10s (or no events yet) | `{"success": true}` | None |
-| No events for 10-29s | `{"success": true}` | None (last_event_time=0 case) |
+| No events for 10-29s (at least one event received) | `{"success": false}` | None |
 | No events for 30+s AND at least one event received | Process exits (exit code 1) | Triggers container restart |
 
 ### 8.3 Status Endpoint

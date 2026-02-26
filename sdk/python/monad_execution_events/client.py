@@ -5,7 +5,7 @@ Features:
 - Cursor resume (tracks server_seqno, reconnects with ?resume_from)
 - Resume ACK validation
 - Heartbeat detection — reconnects on silence
-- Channel abstraction (lifecycle / raw / contention / blocks / txs)
+- Channel abstraction (lifecycle / all / contention / blocks / txs)
 - Typed events
 
 Example::
@@ -68,7 +68,7 @@ class GatewayClient:
         self._should_reconnect = True
         self._reconnect_attempts = 0
         self._pending_subscription: dict[str, Any] | None = None
-        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._heartbeat_handle: asyncio.TimerHandle | None = None
         self._connected = False
 
     # ── Event Registration ───────────────────────────────────────────
@@ -202,7 +202,7 @@ class GatewayClient:
         Returns ``ResumeMode`` with ``mode="resume"`` (lossless) or
         ``mode="snapshot"`` (state snapshot after gap).
         """
-        future: asyncio.Future[ResumeMode] = asyncio.get_event_loop().create_future()
+        future: asyncio.Future[ResumeMode] = asyncio.get_running_loop().create_future()
 
         def _on_resume(info: ResumeMode) -> None:
             if not future.done():
@@ -311,14 +311,14 @@ class GatewayClient:
         timeout = self._opts.heartbeat_timeout
         if timeout <= 0:
             return
-        self._heartbeat_task = asyncio.get_event_loop().call_later(
+        self._heartbeat_handle = asyncio.get_running_loop().call_later(
             timeout, self._on_heartbeat_timeout
-        )  # type: ignore[assignment]
+        )
 
     def _cancel_heartbeat(self) -> None:
-        if self._heartbeat_task is not None:
-            self._heartbeat_task.cancel()  # type: ignore[union-attr]
-            self._heartbeat_task = None
+        if self._heartbeat_handle is not None:
+            self._heartbeat_handle.cancel()
+            self._heartbeat_handle = None
 
     def _on_heartbeat_timeout(self) -> None:
         logger.warning("Heartbeat timeout — forcing reconnect")
