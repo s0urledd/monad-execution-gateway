@@ -271,3 +271,93 @@ EVM-level execution error.
 |-------|------|-------------|
 | `domain_id` | number | Error domain |
 | `status_code` | number | Error status code |
+
+---
+
+## Known Limitations & Proposed Extensions
+
+### `TxnCallFrame`: No Call Type Discrimination
+
+The current `TxnCallFrame` event represents **all** internal calls — `CALL`, `DELEGATECALL`, `STATICCALL`, `CREATE`, and `CREATE2` — using a single struct with no field to distinguish between them.
+
+**What's missing:**
+
+| Field | Purpose | Impact |
+|-------|---------|--------|
+| `call_type` | Distinguish CALL / DELEGATECALL / STATICCALL / CREATE / CREATE2 | Cannot detect internal contract deployments |
+| `created_address` | Address of newly deployed contract | Cannot map creator → deployed contract |
+
+**What's available today:**
+
+The `TxnHeaderStart` event exposes `is_contract_creation: boolean`, which indicates whether the **top-level transaction** is a contract creation. This covers direct `CREATE` transactions (e.g., deploying via `new ContractFactory().deploy()`), but does **not** cover:
+
+- Factory-pattern deployments (CREATE from within a contract call)
+- CREATE2 deployments (deterministic address)
+- Nested contract creations at any call depth > 0
+
+**Consequence:** Consumers that need to track internal contract deployments (indexers, MEV bots monitoring factory contracts, analytics pipelines) cannot reliably do so from the current event stream.
+
+### Proposed Solutions
+
+Two options, in order of preference:
+
+#### Option A: Add `call_type` to `TxnCallFrame`
+
+Extend the existing event with an opcode discriminator:
+
+```jsonc
+// TxnCallFrame payload (proposed)
+{
+  "type": "TxnCallFrame",
+  "txn_index": 5,
+  "depth": 2,
+  "call_type": "Create2",        // NEW — "Call" | "DelegateCall" | "StaticCall" | "Create" | "Create2"
+  "caller": "0x...",
+  "call_target": "0x...",
+  "created_address": "0x...",    // NEW — present only when call_type is Create or Create2
+  "value": "0x0",
+  "input": "0x...",
+  "output": "0x..."
+}
+```
+
+**Pros:** Minimal schema change; backwards-compatible (new optional fields). Follows the existing pattern of enriching call frames.
+
+**Cons:** Requires the upstream `monad-exec-events` crate to expose the opcode in the raw event ring data.
+
+#### Option B: Dedicated `ContractCreated` Event
+
+Add a new event type specifically for contract deployments:
+
+```jsonc
+// ContractCreated payload (proposed)
+{
+  "type": "ContractCreated",
+  "txn_index": 5,
+  "depth": 2,
+  "creator": "0x...",
+  "created_address": "0x...",
+  "create_type": "Create2",     // "Create" | "Create2"
+  "salt": "0x...",              // present only for Create2
+  "init_code_hash": "0x...",
+  "value": "0x0"
+}
+```
+
+**Pros:** Richer data model; explicit salt and init_code_hash enable deterministic address verification. Subscribable independently (e.g., `{"subscribe": ["ContractCreated"]}`).
+
+**Cons:** New event type; requires upstream event ring changes; increases event catalog size.
+
+### Upstream Dependency
+
+Both options require changes in the `monad-exec-events` crate (source: `category-labs/monad-bft`, tag `release/exec-events-sdk-v1.0`). The EVM execution engine inherently knows the opcode — the information exists at the source but is not currently propagated through the event ring.
+
+### Workarounds (Current)
+
+In the absence of a `call_type` field, consumers can use these heuristic approaches. **None are fully reliable:**
+
+| Approach | Method | Reliability |
+|----------|--------|-------------|
+| Top-level only | Use `TxnHeaderStart.is_contract_creation` | Exact, but depth-0 only |
+| Target heuristic | Check if `call_target` is the zero address (`0x000...000`) | Unreliable — not all CREATE opcodes target zero address in the event payload |
+| State inference | Monitor `AccountAccess` events for new `code_hash` values | Indirect, fragile, requires cross-event correlation |
